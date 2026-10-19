@@ -3,6 +3,9 @@ Copyright (C) 2014 The Android Open Source Project.
 Modified for the LineageQS C/UIKit port.
 Source: https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/libs/WindowManager/Shell/src/com/android/wm/shell/animation/FlingAnimationUtils.java
 
+LQSGrabberGeometry.h and fixed-screen grabber touch capture adapt DroidSB's
+transient-bar geometry. Copyright 2026 drel4. Licensed under Apache-2.0.
+
 
                                  Apache License
                            Version 2.0, January 2004

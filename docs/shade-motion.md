@@ -427,6 +427,24 @@ Sources:
 - [GridAnchor](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/qs/composefragment/ui/GridAnchor.kt)
 - [QS content hierarchy](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/qs/composefragment/QSFragmentCompose.kt), [shared-tile eligibility](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/qs/composefragment/QSFragmentComposeViewModel.kt)
 
+## Native top-arrow corner correction (DroidSB)
+
+The grabber visual edge now follows DroidSB's fixed-screen original-touch
+approach, instead of choosing the closest host edge to the finger. Capture the
+true first touch in `UIScreen.fixedCoordinateSpace` before recognition. Portrait
+uses the fixed top (bottom when upside down); landscape chooses between the two
+fixed side edges using the original touch's half of the display. Position along
+that edge cannot turn a near-corner top pull into a side arrow.
+
+Convert the chosen edge's midpoint into the current CoverSheet host before
+presentation, including its hidden start geometry. This resolves the edge after
+the host's first-time orientation setup. Native recognition, first-swipe arrow,
+second-swipe acceptance and timeout remain unchanged; only the scoped visual
+geometry uses the corrected edge. The bottom grabber is untouched.
+
+Reference: `DroidSB/Sources/DSBTransientGeometry.h` and
+`DroidSB/Sources/DSBTransientBar.m` (Apache-2.0, Copyright 2026 drel4).
+
 ## 13. Classic-shade footer spacing
 
 LineageOS 24 separates the system bottom inset from footer content padding.

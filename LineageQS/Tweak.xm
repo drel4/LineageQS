@@ -25,6 +25,7 @@
 #import "Sources/LQSBackends.h"
 #import "Sources/LQSNotifications.h"
 #import "Sources/LQSStrings.h"
+#import "Sources/LQSGrabberGeometry.h"
 
 @interface CCUIModularControlCenterOverlayViewController : UIViewController
 - (void)beginPresentationWithLocation:(CGPoint)l translation:(CGPoint)t velocity:(CGPoint)v;
@@ -621,42 +622,92 @@ static BOOL RouteTopGesture(UIPanGestureRecognizer *g, UIGestureRecognizerState 
 }
 
 static char kTopGrabberVisualEdge;
+static char kTopGrabberTouch;
+
+// Fixed-screen original-touch capture adapted from DroidSB's transient bar
+// (Apache-2.0, Copyright 2026 drel4). Keep native recognition/presentation.
+@interface LQSTopGrabberTouch : NSObject
+@property(nonatomic, strong) UIScreen *screen;
+@property(nonatomic) CGPoint fixedStart;
+@property(nonatomic) UIInterfaceOrientation orientation;
+@property(nonatomic, weak) UIPanGestureRecognizer *gesture;
+@end
+@implementation LQSTopGrabberTouch
+@end
+
+static BOOL IsTopGrabber(SBGrabberTongue *tongue) {
+    Class primary = objc_getClass("SBCoverSheetPrimarySlidingViewController");
+    return gTopSwipe && primary && [IvarValue(tongue, "_delegate") isKindOfClass:primary];
+}
+
+static UIInterfaceOrientation TopGrabberOrientation(UIPanGestureRecognizer *g, UIInterfaceOrientation fallback) {
+    UIApplication *app = UIApplication.sharedApplication;
+    SEL activeSelector = NSSelectorFromString(@"activeInterfaceOrientation");
+    if ([app respondsToSelector:activeSelector]) {
+        UIInterfaceOrientation active = ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(app, activeSelector);
+        if (active >= UIInterfaceOrientationPortrait && active <= UIInterfaceOrientationLandscapeRight) fallback = active;
+    }
+    SEL touchSelector = NSSelectorFromString(@"_touchInterfaceOrientation");
+    if ([g respondsToSelector:touchSelector]) {
+        UIInterfaceOrientation touch = ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(g, touchSelector);
+        if (touch >= UIInterfaceOrientationPortrait && touch <= UIInterfaceOrientationLandscapeRight) fallback = touch;
+    }
+    return fallback;
+}
+
+static void CaptureTopGrabberTouch(SBGrabberTongue *tongue, UIPanGestureRecognizer *g, UITouch *touch) {
+    if (!IsTopGrabber(tongue)) return;
+    objc_setAssociatedObject(tongue, &kTopGrabberTouch, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIWindow *window = touch.window;
+    if (!window) return;
+    LQSTopGrabberTouch *context = [LQSTopGrabberTouch new];
+    context.screen = window.screen;
+    context.gesture = g;
+    context.orientation = TopGrabberOrientation(g, window.windowScene.interfaceOrientation);
+    context.fixedStart = [window convertPoint:[touch locationInView:window]
+                            toCoordinateSpace:window.screen.fixedCoordinateSpace];
+    objc_setAssociatedObject(tongue, &kTopGrabberTouch, context, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
 
 static void CaptureTopGrabberVisualEdge(SBGrabberTongue *tongue, UIPanGestureRecognizer *g) {
-    if (!gTopSwipe || (g.state != UIGestureRecognizerStatePossible && g.state != UIGestureRecognizerStateBegan)) return;
-    Class primary = objc_getClass("SBCoverSheetPrimarySlidingViewController");
-    if (!primary || ![IvarValue(tongue, "_delegate") isKindOfClass:primary]) return;
+    if (!IsTopGrabber(tongue)) return;
     UIView *host = IvarValue(tongue, "_containingView");
-    if (![host isKindOfClass:UIView.class]) return;
-    UIInterfaceOrientation orientation = host.window.windowScene.interfaceOrientation;
-    // Before the first recognition the CoverSheet scene can still report its
-    // old orientation. Prefer the active interface until touch orientation is set.
-    UIApplication *app = UIApplication.sharedApplication;
-    SEL activeOrientation = NSSelectorFromString(@"activeInterfaceOrientation");
-    if ([app respondsToSelector:activeOrientation]) {
-        UIInterfaceOrientation active = ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(app, activeOrientation);
-        if (active != UIInterfaceOrientationUnknown) orientation = active;
+    if (![host isKindOfClass:UIView.class] || !host.window) return;
+    LQSTopGrabberTouch *context = objc_getAssociatedObject(tongue, &kTopGrabberTouch);
+    if (context.gesture != g || context.screen != host.window.screen) {
+        // Fallback for runtimes without a touch callback: retain the reconstructed
+        // start in fixed space once, never the later, rotated host coordinates.
+        if (g.state != UIGestureRecognizerStatePossible && g.state != UIGestureRecognizerStateBegan) return;
+        CGPoint p = [g locationInView:host], delta = [g translationInView:host];
+        context = [LQSTopGrabberTouch new];
+        context.screen = host.window.screen;
+        context.gesture = g;
+        context.orientation = TopGrabberOrientation(g, host.window.windowScene.interfaceOrientation);
+        context.fixedStart = [host convertPoint:CGPointMake(p.x - delta.x, p.y - delta.y)
+                             toCoordinateSpace:context.screen.fixedCoordinateSpace];
+        objc_setAssociatedObject(tongue, &kTopGrabberTouch, context, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    SEL touchOrientation = NSSelectorFromString(@"_touchInterfaceOrientation");
-    if ([g respondsToSelector:touchOrientation]) {
-        UIInterfaceOrientation touch = ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(g, touchOrientation);
-        if (touch != UIInterfaceOrientationUnknown) orientation = touch;
-    }
-    if (!UIInterfaceOrientationIsLandscape(orientation)) {
-        objc_setAssociatedObject(tongue, &kTopGrabberVisualEdge, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        return;
-    }
-    UIRectEdge edge = UIRectEdgeTop;
-    // CoverSheet's host can remain portrait-aligned over a landscape app.
-    // Locate the physical top pull in that host, rather than assuming its
-    // local top is also the screen top. Cache for the native hide animation.
-    CGPoint p = [g locationInView:host], delta = [g translationInView:host];
-    p = CGPointMake(p.x - delta.x, p.y - delta.y);
+    if (g.state == UIGestureRecognizerStatePossible || g.state == UIGestureRecognizerStateBegan)
+        context.orientation = TopGrabberOrientation(g, context.orientation);
+    id<UICoordinateSpace> fixed = context.screen.fixedCoordinateSpace;
+    CGRect screen = fixed.bounds;
+    unsigned displayEdge = LQSDisplayTopEdge(UIInterfaceOrientationIsLandscape(context.orientation),
+        context.orientation == UIInterfaceOrientationPortraitUpsideDown, context.fixedStart.x, CGRectGetMidX(screen));
+    // Convert the chosen edge's MIDPOINT into the current host. A touch near a
+    // top corner must not turn the top arrow into a side arrow. Resolve again at
+    // presentation because CoverSheet can orient its host after recognition.
+    CGPoint midpoint = CGPointMake(CGRectGetMidX(screen), CGRectGetMinY(screen));
+    if (displayEdge == LQSEdgeBottom) midpoint.y = CGRectGetMaxY(screen);
+    else if (displayEdge == LQSEdgeLeft) midpoint = CGPointMake(CGRectGetMinX(screen), CGRectGetMidY(screen));
+    else if (displayEdge == LQSEdgeRight) midpoint = CGPointMake(CGRectGetMaxX(screen), CGRectGetMidY(screen));
+    CGPoint p = [host convertPoint:midpoint fromCoordinateSpace:fixed];
     CGRect b = host.bounds;
+    UIRectEdge edge = UIRectEdgeTop;
     CGFloat best = fabs(p.y - CGRectGetMinY(b));
     CGFloat left = fabs(p.x - CGRectGetMinX(b)), right = fabs(p.x - CGRectGetMaxX(b));
     if (left < best) { best = left; edge = UIRectEdgeLeft; }
-    if (right < best) edge = UIRectEdgeRight;
+    if (right < best) { best = right; edge = UIRectEdgeRight; }
+    if (fabs(p.y - CGRectGetMaxY(b)) < best) edge = UIRectEdgeBottom;
     objc_setAssociatedObject(tongue, &kTopGrabberVisualEdge, @(edge), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
@@ -677,7 +728,14 @@ static void WithTopGrabberVisualEdge(SBGrabberTongue *tongue, void (^calculate)(
 }
 
 %hook SBGrabberTongue
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
+    if ([g isKindOfClass:UIPanGestureRecognizer.class]) CaptureTopGrabberTouch(self, (UIPanGestureRecognizer *)g, touch);
+    return %orig;
+}
+
 - (void)_presentTongueAnimated:(BOOL)animated autoDismiss:(BOOL)autoDismiss {
+    LQSTopGrabberTouch *context = objc_getAssociatedObject(self, &kTopGrabberTouch);
+    if (context.gesture) CaptureTopGrabberVisualEdge(self, context.gesture);
     // The container may have been created before the first landscape gesture.
     // Correct its hidden start geometry before iOS captures the show animation;
     // correcting only the target frame leaves that first arrow on the old edge.
