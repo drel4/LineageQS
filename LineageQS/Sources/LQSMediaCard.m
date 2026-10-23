@@ -81,12 +81,13 @@ static CGFloat LerpInvSat(CGFloat a, CGFloat b, CGFloat v) { return MAX(0, MIN(1
     NSString *_avdGlyph, *_avdBg;
     CFTimeInterval _optimisticUntil;
     BOOL _seeking;
+    BOOL _lastHasMedia;
     BOOL _lastPlaying;
     UILabel *_title, *_artist, *_app;
     UIButton *_play, *_prev, *_next;
     NSTimer *_timer;
 }
-+ (CGFloat)height { return 128; } // qs_media_session_height_collapsed
++ (CGFloat)height { return 176; } // A17 Media.DEFAULT_HEIGHT; landscape QQS uses 128.
 
 - (UIButton *)button:(NSString *)icon sel:(SEL)sel {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -148,6 +149,8 @@ static CGFloat LerpInvSat(CGFloat a, CGFloat b, CGFloat v) { return MAX(0, MIN(1
 
 - (void)update {
     LQSMedia *m = [LQSMedia shared];
+    BOOL presenceChanged = m.hasMedia != _lastHasMedia;
+    _lastHasMedia = m.hasMedia;
     BOOL trackChanged = m.title.length && ![m.title isEqualToString:(_lastTitle ?: @"")];
     if (m.title.length) _lastTitle = m.title;
     void (^content)(void) = ^{
@@ -165,7 +168,7 @@ static CGFloat LerpInvSat(CGFloat a, CGFloat b, CGFloat v) { return MAX(0, MIN(1
     if (!_playGlyph.image) [self setRestPlaying:m.playing];
     else if (m.playing != _lastPlaying && CACurrentMediaTime() > _optimisticUntil) [self showPlaying:m.playing]; // stale state right after a tap is ignored
     [self tick];
-    if (self.onChange) self.onChange();
+    if (presenceChanged && self.onChange) self.onChange();
 }
 
 // Media3ActionFactory: not playing -> ic_media_play_button (+ _container), playing ->

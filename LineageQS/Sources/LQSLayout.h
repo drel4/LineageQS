@@ -12,6 +12,17 @@ static inline double LQSAnchoredQSOffset(double expansion, double compactTop, do
     return (1 - fmax(0, fmin(1, expansion))) * (compactTop - expandedTop);
 }
 
+// Classic NPVC: 16dp * lerp(0.2,1,saturate(velocity/(highVelocity*0.5))).
+static inline double LQSShadeOvershoot(double velocity) {
+    return velocity < 0 ? 0 : 16 * (0.2 + 0.8 * fmin(1, velocity / 1500));
+}
+
+// Media is a shared element in QQS and QS, not content which fades at q=0.5.
+// Pager/Edit remains ahead of media inside the scrollable QS content.
+static inline double LQSExpandedFooterTop(double gridBottom, double viewportHeight, double mediaHeight) {
+    return fmax(gridBottom, viewportHeight - 48 - (mediaHeight > 0 ? mediaHeight + 24 : 0));
+}
+
 // NSSL.calculateInterpolatedStackHeight: the no-shelf stack starts at 50%
 // height. QSC passes that stack fraction, not raw shade progress, to QQS.
 static inline double LQSNotificationStackFraction(double progress) {

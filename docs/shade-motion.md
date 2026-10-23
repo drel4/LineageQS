@@ -394,23 +394,20 @@ Sources (LineageOS 24):
 ## QQS-to-QS visual transition update
 
 The port now uses `FromQuickQuickSettingsToQuickSettings`, not the separate
-shade-to-QS transition's 0.95 fade endpoint. QS-only tiles fade
+shade-to-QS transition's 0.95 fade endpoint. QS-only tiles and brightness fade
 over 0.43–1; shared first-page tiles remain opaque and interpolate their layout
 bounds without scaling glyphs. For this fixed-column layout, the shared tile
 positions are equivalent to the interpolated `GridAnchor` position.
 
 Entering QS content uses `(1-q) * (qqsGridTop-qsGridTop)` as its translation,
-following `AnchoredTranslate`. The pager/Edit row uses that same
-anchor delta instead of an independent 40pt slide. The pager/Edit row belongs to
+following `AnchoredTranslate`. Brightness and the pager/Edit row use that same
+anchor delta instead of independent 40pt slides. The pager/Edit row belongs to
 `QuickSettingsContent`, so it shares the 0.43–1 fade. Settings/Power belong to
 `FooterActions`: they remain bottom-anchored and fade over 0.9–1. Final safe-area
 spacing, tile sizes and activated radii are unchanged.
 
-At the contributor's request, brightness alone retains the original
-MakrSas/LineageQS animation: `qsBrightnessTop - (1-q)*40` and a linear fade over
-0.43–0.95. This is an intentional exception to the newer QS content transition,
-not a port of the legacy Android slider-scale/unfurl animation. No other QS
-motion is reverted.
+Brightness now follows the A17 transition too, superseding the contributor's
+earlier request to retain the original upstream brightness slide.
 
 When collapsing a non-first page, keep the outgoing page in place horizontally
 and fade its QS content while separate, noninteractive QQS counterparts fade
@@ -491,8 +488,8 @@ Clicks alone use the 368ms `TOUCH_RESPONSE` curve.
 Already-animated native iOS progress samples still pass through directly:
 the Android planner drives QS and endpoint-only fallback settles, not a second
 ease over native motion. Native gesture acceptance and endpoint decisions remain
-iOS-owned. The existing overshoot is still an approximation, not a complete
-port of Android's over-expansion/spring-back physics.
+iOS-owned. Fallback over-expansion and spring-back now use the source timeline
+described in section 15; native/coasting motion is still not replaced.
 
 A temporary external harness compared the production C algorithm against the
 unmodified LineageOS Java class with minimal platform adapters, including a
@@ -505,3 +502,48 @@ Sources:
 - [FlingAnimationUtils](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/libs/WindowManager/Shell/src/com/android/wm/shell/animation/FlingAnimationUtils.java)
 - [NotificationPanelViewController](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/shade/NotificationPanelViewController.java)
 - [QuickSettingsControllerImpl](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/shade/QuickSettingsControllerImpl.java)
+
+## 15. Android 17 consistency pass (2026-10-23)
+
+Target: LineageOS `lineage-24.0` classic single shade with Compose QS content.
+This is not a claim that every Android 17 device enables the same scene/blur/
+media flags. UIKit still supplies native gesture protection, material rendering,
+scrolling and safe-area coordinates; layout uses the existing 1dp = 1pt mapping.
+
+| Area | Updated behavior | Source |
+|---|---|---|
+| Brightness | Shared grid-anchor translation and QSContent fade over 0.43–1; removes the old upstream 40pt slide again, per the latest preference | `FromQuickQuickSettingsToQuickSettings.kt` |
+| Header clock | One continuously visible clock moves/grows from 1 to 2.57 instead of two fading copies; date/status/carrier retain the 14%/58% keyframes | `qqs_header.xml`, `qs_header.xml`, `combined_qs_header_scene.xml`, `integers.xml` |
+| Header constraints | Date and carrier widths respect adjacent clock/status content on narrow phones; editor status padding follows current safe area | Header constraint sets and `statusBarsPadding` mapping |
+| Media | Shared card remains visible through QQS/QS, rather than disappearing halfway; default height 176pt, compact landscape height 128pt | `QSFragmentCompose.MediaObject`, `Media.DEFAULT_HEIGHT/COMPRESSED_HEIGHT` |
+| Expanded QS | Brightness, tile pages, pager/Edit and media are scrollable; phone header contents scroll away in sync, while Settings/Power stay pinned | `QSFragmentCompose.QuickSettingsElement`, `ShadeHeaderController.updateScrollY` |
+| Small-screen media | Grid and pager precede media inside the scroller; its last frame remains reachable above pinned actions | `PaginatedGridLayout`, `QuickSettingsLayout` |
+| Scroll handoff | Content scrolls while it has room; an upward pull at its end or on the header collapses QS. Collapsing reduces the current offset smoothly and QQS resets it | UIKit adaptation of the nested QS scroller |
+| Overshoot | Fallback opening amount `16 * lerp(0.2,1,saturate(v/1500))`, eased over the fling fraction; separate 400ms FAST_OUT_SLOW_IN return replaces the additive fixed keyframe | `NotificationPanelViewController.createHeightAnimator/springBack` |
+| Interruption | One presentation display link owns both fallback phases; native progress and finger takeover cancel/rebase without a lingering CA keyframe. QS expansion can continue alongside spring-back | Existing identity/epoch guards retained |
+| Brightness mirror | Only brightness stays visible, including with the new nested scroller; next presentation restores tile opacity. Media metadata refresh no longer starts repeated panel layout animations | UIKit state/lifecycle correction |
+
+Over-expansion moves notification layout by the full amount and QS by half,
+matching the classic single-shade centering relationship. The native interactive
+rubber-band algorithm and already-eased iOS presentation samples remain native;
+this does not install a second Android fling over them. Landscape remains the
+port's vertically stacked layout rather than implementing Android tablet/
+taskbar or side-by-side media configurations.
+
+Unchanged source-based behavior includes tile radii, icon size during squish,
+per-tile springs/vector animation, fling calculation, FooterActions sizing,
+theme tint and material blur. The existing editor already has a total 500ms
+two-phase fade; notification/editor internals and horizontal page snapping still
+contain UIKit adaptations rather than a full Compose/Android framework port.
+
+Verification uses temporary, uncommitted harnesses for layout/alpha boundaries,
+media/footer reachability, overshoot limits and prior Java/C fling comparisons.
+Compilation and package/signature checks do not substitute for device testing
+of the new scroll handoff, clock rendering or animation feel.
+
+Primary references:
+
+- [Header MotionScene](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/res/xml/combined_qs_header_scene.xml), [QQS constraints](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/res/xml/qqs_header.xml), [QS constraints](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/res/xml/qs_header.xml)
+- [Compose QS hierarchy and scroller](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/qs/composefragment/QSFragmentCompose.kt)
+- [Media constants and shared element](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/media/remedia/ui/compose/Media.kt)
+- [Shade fling and spring-back](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/shade/NotificationPanelViewController.java)

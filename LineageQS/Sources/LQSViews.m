@@ -632,8 +632,8 @@ static NSString *DataTypeIcon(NSString *t) {
 
 // ShadeHeader.kt: collapsed row (clock 14sp + date, 5dp spacing | status icons +
 // battery chip) and ExpandedShadeHeader (Column min 120dp, bottom aligned, 16dp
-// spacing: clock scaled 2.57 | carrier max 180dp; date | chip). Cross-fade as in
-// FromShadeToQuickSettingsTransition: collapsed out over [0, 0.14], expanded in from 0.58.
+// spacing: clock scaled 2.57 | carrier max 180dp; date | chip). Classic A17
+// MotionScene keeps the clock shared; only date/status/carrier cross-fade.
 @implementation LQSHeaderView {
     UIView *_collapsed, *_expanded;
     UILabel *_clock, *_date, *_bigClock, *_bigDate, *_carrier;
@@ -643,6 +643,11 @@ static NSString *DataTypeIcon(NSString *t) {
     UILabel *_bigPercent;
     NSDictionary *_info;
     NSTimer *_timer;
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return hit == self ? nil : hit;
 }
 
 - (UILabel *)label:(CGFloat)size weight:(CGFloat)w in:(UIView *)v {
@@ -668,6 +673,7 @@ static NSString *DataTypeIcon(NSString *t) {
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
         _collapsed = [UIView new];
+        self.clipsToBounds = YES;
         _expanded = [UIView new];
         [self addSubview:_collapsed];
         [self addSubview:_expanded];
@@ -676,6 +682,9 @@ static NSString *DataTypeIcon(NSString *t) {
         _chip = [self chipIn:_collapsed wifi:&_wifi signal:&_signal type:&_type battery:&_battery];
         // Clock scaled 2.57x (ShadeHeader.kt:317); drawn at the scaled size to stay sharp.
         _bigClock = [self label:14 * 2.57 weight:500 in:_expanded];
+        _bigClock.hidden = YES; // endpoint measurement only; one live clock morphs
+        [_clock removeFromSuperview];
+        [self addSubview:_clock]; // not part of the date/status fade-out group
         _carrier = [self label:14 weight:500 in:_expanded];
         _carrier.textAlignment = NSTextAlignmentRight;
         _bigDate = [self label:14 weight:500 in:_expanded];
@@ -804,12 +813,16 @@ static CGFloat LayoutChip(UIView *chip, NSArray<UIImageView *> *icons, LQSBatter
     _expanded.frame = CGRectMake(0, 0, w, [self expandedHeight]);
     // Collapsed: one row centred in the 48dp header.
     CGFloat ch = [self collapsedHeight];
+    _clock.font = [LQSTheme sansWithSize:14 weight:500];
     CGSize cs = [_clock sizeThatFits:CGSizeMake(200, ch)];
     _clock.frame = CGRectMake(pad, (ch - 20) / 2, cs.width, 20);
     CGSize ds = [_date sizeThatFits:CGSizeMake(200, ch)];
-    _date.frame = CGRectMake(CGRectGetMaxX(_clock.frame) + 5, (ch - 20) / 2, ds.width, 20);
+    _date.frame = CGRectMake(CGRectGetMaxX(_clock.frame) + 8, (ch - 20) / 2, ds.width, 20);
     CGFloat chipW = LayoutChip(_chip, @[_type, _signal, _wifi], _battery, nil, 24);
     _chip.frame = CGRectMake(w - pad - chipW + 6, (ch - 24) / 2, chipW, 24);
+    CGRect dateFrame = _date.frame;
+    dateFrame.size.width = MIN(dateFrame.size.width, MAX(0, CGRectGetMinX(_chip.frame) - 8 - dateFrame.origin.x));
+    _date.frame = dateFrame;
     // Expanded: bottom-aligned column inside 120dp, 16dp spacing.
     CGFloat eh = [self expandedHeight], rowDate = 20, bigH = 20 * 2.57;
     CGFloat top = eh - rowDate - 16 - bigH;
@@ -820,6 +833,9 @@ static CGFloat LayoutChip(UIView *chip, NSArray<UIImageView *> *icons, LQSBatter
     _bigDate.frame = CGRectMake(pad, eh - rowDate, bds.width, rowDate);
     CGFloat bigChipW = LayoutChip(_bigChip, @[_bigType, _bigSignal, _bigWifi], _bigBattery, _bigPercent, 24);
     _bigChip.frame = CGRectMake(w - pad - bigChipW + 6, eh - rowDate - 2, bigChipW, 24);
+    CGRect bigDateFrame = _bigDate.frame;
+    bigDateFrame.size.width = MIN(bigDateFrame.size.width, MAX(0, CGRectGetMinX(_bigChip.frame) - 8 - pad));
+    _bigDate.frame = bigDateFrame;
     [self applyExpansion];
 }
 
@@ -830,6 +846,20 @@ static CGFloat LayoutChip(UIView *chip, NSArray<UIImageView *> *icons, LQSBatter
 
 - (void)applyExpansion {
     CGFloat e = _expansion;
+    // A17 qqs_header/qs_header scale the SAME clock from 1 to 2.57. Only
+    // date/status/carrier use the 14%/58% fade keyframes; the clock never blanks.
+    _clock.font = [LQSTheme sansWithSize:14 * (1 + 1.57 * e) weight:500];
+    CGFloat clockHeight = 20 * (1 + 1.57 * e);
+    CGFloat compactY = ([self collapsedHeight] - 20) / 2;
+    CGFloat expandedY = _bigClock.frame.origin.y;
+    CGSize clockSize = [_clock sizeThatFits:CGSizeMake(MAX(0, self.bounds.size.width - 32), clockHeight)];
+    _clock.frame = CGRectMake([LQSTheme sideInset], compactY + (expandedY - compactY) * e,
+                              clockSize.width, clockHeight);
+    CGFloat carrierStart = MAX(self.bounds.size.width - [LQSTheme sideInset] - 180, CGRectGetMaxX(_clock.frame) + 16);
+    CGRect carrier = _carrier.frame;
+    carrier.origin.x = carrierStart;
+    carrier.size.width = MAX(0, self.bounds.size.width - [LQSTheme sideInset] - carrierStart);
+    _carrier.frame = carrier;
     _collapsed.alpha = 1 - MIN(1, e / 0.14);
     _expanded.alpha = MAX(0, (e - 0.58) / 0.42);
     _collapsed.userInteractionEnabled = e < 0.5;

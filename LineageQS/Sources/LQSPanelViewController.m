@@ -60,7 +60,18 @@ static CGFloat Range(CGFloat x, CGFloat a, CGFloat b) { return MAX(0, MIN(1, (x 
 static CGFloat ContentAlpha(CGFloat f) { return EaseInOut(Range(f, 0.3, 1)); }
 static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 
-@interface LQSPanelViewController () <UIGestureRecognizerDelegate>
+@interface LQSPanelViewController () <UIGestureRecognizerDelegate, UIScrollViewDelegate>
+@end
+
+// Scroll only expanded QS content; let empty QQS space pass through to the
+// notification list. Header and FooterActions stay outside this scroller.
+@interface LQSContentScrollView : UIScrollView
+@end
+@implementation LQSContentScrollView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return hit == self ? nil : hit;
+}
 @end
 
 // Drawing needs enough vertical room for whole tiles throughout expansion.
@@ -90,6 +101,7 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 @implementation LQSPanelViewController {
     UIView *_backdrop, *_panelColor, *_notificationArea, *_notificationSurface, *_content, *_footer, *_actions;
     LQSGridViewport *_gridClip;
+    LQSContentScrollView *_qsScroll;
     UIVisualEffectView *_blur;
     LQSHeaderView *_header;
     LQSBrightnessView *_brightness;
@@ -119,6 +131,8 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     CFTimeInterval _lastInteractiveTime;
     CGFloat _lastInteractiveProgress, _interactiveVelocity;
     LQSFling _settleFling, _qFling;
+    CGFloat _overExpansion, _settleOverFrom, _settleOverTo;
+    BOOL _springBack;
     NSTimer *_liveTimer;
     BOOL _liveRefreshPending;
     LQSDetailDialog *_dialog;
@@ -142,7 +156,8 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 - (CGFloat)tileHeight { return MIN([LQSTheme tileHeight], [self cellWidth]); }
 - (CGFloat)rowHeight:(CGFloat)squish { return [self tileHeight] * squish; }
 - (CGFloat)gridHeightRows:(NSInteger)rows squish:(CGFloat)s { return rows * [self rowHeight:s] + (rows - 1) * [LQSTheme tileGap]; }
-- (CGFloat)mediaExtra { return _media.hasMedia ? 16 + [LQSMediaCard height] : 0; } // QQS: tiles, then media (16dp)
+- (CGFloat)compactMediaHeight { return gLandscape ? 128 : [LQSMediaCard height]; }
+- (CGFloat)mediaExtra { return _media.hasMedia ? 16 + [self compactMediaHeight] : 0; }
 - (CGFloat)qqsBottom { return [self qqsTop] + [self gridHeightRows:MIN(kQQSRows, [self usedRowsOnFirstPage]) squish:1] + [self mediaExtra] + 24; } // qqs_layout_padding_bottom
 - (CGFloat)qsBottom { return self.view.bounds.size.height; } // actions/footer are bottom-anchored
 - (CGFloat)cellWidth { return (self.view.bounds.size.width - 2 * [LQSTheme sideInset] - (kColumns - 1) * [LQSTheme tileGap]) / kColumns; }
@@ -207,7 +222,15 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     [_notificationArea addSubview:_notifs];
     _media = [LQSMediaCard new];
     _media.onChange = ^{ [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:1 initialSpringVelocity:0 options:UIViewAnimationOptionAllowUserInteraction animations:^{ [weakSelf.view setNeedsLayout]; [weakSelf.view layoutIfNeeded]; } completion:nil]; };
-    [_content addSubview:_media];
+    _qsScroll = [LQSContentScrollView new];
+    _qsScroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    _qsScroll.showsHorizontalScrollIndicator = NO;
+    _qsScroll.showsVerticalScrollIndicator = NO;
+    _qsScroll.directionalLockEnabled = YES;
+    _qsScroll.bounces = NO;
+    _qsScroll.delegate = self;
+    [_content addSubview:_qsScroll];
+    [_qsScroll addSubview:_media];
 
     _header = [LQSHeaderView new];
     _header.onClockTap = ^{
@@ -223,15 +246,15 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     [_brightness addTarget:self action:@selector(brightnessChanged) forControlEvents:UIControlEventValueChanged];
     // Brightness mirror: while dragging only the slider stays visible (BrightnessMirrorController).
     _brightness.onDragChanged = ^(BOOL d) { [weakSelf mirror:d]; };
-    [_content addSubview:_brightness];
+    [_qsScroll addSubview:_brightness];
 
     _gridClip = [LQSGridViewport new];
     _gridClip.clipsToBounds = YES;
-    [_content addSubview:_gridClip];
+    [_qsScroll addSubview:_gridClip];
 
     // PaginatedGridLayout FooterBar 48dp: page dots centred, edit at the end.
     _footer = [UIView new];
-    [_content addSubview:_footer];
+    [_qsScroll addSubview:_footer];
     _dots = [LQSPageDots new];
     _dots.userInteractionEnabled = NO;
     [_footer addSubview:_dots];
@@ -267,6 +290,8 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     _hpan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pagePan:)];
     _hpan.delegate = self;
     [_gridClip addGestureRecognizer:_hpan];
+    [_qsScroll.panGestureRecognizer requireGestureRecognizerToFail:_vpan];
+    [_qsScroll.panGestureRecognizer requireGestureRecognizerToFail:_hpan];
     // The list keeps its own scrolling; at its top a downward drag turns into QS
     // expansion, at its end an upward drag closes the shade (one continuous gesture).
     [_notifs.scrollView.panGestureRecognizer addTarget:self action:@selector(listPan:)];
@@ -633,8 +658,9 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 
 - (void)mirror:(BOOL)on {
     _brightnessMirroring = on;
+    if (on) _qsScroll.scrollEnabled = NO;
     [UIView animateWithDuration:on ? 0.15 : 0.25 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
-        for (UIView *v in self->_content.subviews) if (v != self->_brightness) v.alpha = on ? 0 : 1;
+        for (UIView *v in @[self->_header, self->_gridClip, self->_footer, self->_actions, self->_media]) v.alpha = on ? 0 : 1;
         self->_notificationArea.alpha = on ? 0 : 1;
         self->_backdrop.alpha = on ? 0.15 : MAX(0, MIN(1, self->_progress));
     } completion:^(BOOL f) { if (!on) [self layoutAll]; }];
@@ -671,15 +697,16 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     _content.bounds = CGRectMake(0, 0, b.size.width, b.size.height);
     _content.center = CGPointMake(CGRectGetMidX(b), CGRectGetMidY(b));
     CGFloat q = _q, p = MAX(0, MIN(1, _progress));
+    _content.transform = CGAffineTransformMakeTranslation(0, -0.175 * (1 - p) * [self qqsBottom] + _overExpansion * 0.5);
     _header.frame = CGRectMake(0, 0, w, [_header expandedHeight]);
+    _header.bounds = CGRectMake(0, gLandscape ? 0 : _qsScroll.contentOffset.y, w, [_header expandedHeight]);
     _header.expansion = gLandscape ? 0 : q; // landscape keeps the one-row header
 
     CGFloat qsOffset = LQSAnchoredQSOffset(q, [self qqsTop], [self qsGridTop]);
     CGFloat qsAlpha = LQSExpansionContentAlpha(q);
-    // Original MakrSas/LineageQS brightness animation; intentionally independent
-    // of the newer grid-anchored QS content transition.
-    _brightness.frame = CGRectMake(inset, [self qsBrightnessTop] - (1 - q) * 40, w - 2 * inset, [self brightnessHeight]);
-    _brightness.alpha = Range(q, 0.43, 0.95);
+    // A17 QS-only brightness inherits its scene's GridAnchor and 0.43–1 fade.
+    _brightness.frame = CGRectMake(inset, [self qsBrightnessTop] + qsOffset, w - 2 * inset, [self brightnessHeight]);
+    _brightness.alpha = qsAlpha;
     _brightness.userInteractionEnabled = q > 0.95;
 
     // Keep the drawing viewport full-height. Interpolating its clipping edge
@@ -689,13 +716,21 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     CGFloat qqsH = [self gridHeightRows:qqsRows squish:squish], qsH = [self gridHeightRows:kRowsPerPage squish:1];
     CGFloat top = Lerp([self qqsTop], [self qsGridTop], q);
     _gridClip.frame = CGRectMake(0, top, w, MAX(0, b.size.height - top));
+    _gridClip.alpha = 1;
     _gridClip.interactionHeight = Lerp(qqsH, qsH, q) + kBounce;
     [self layoutTilesOnly];
 
     CGFloat qsGridBottom = [self qsGridTop] + qsH;
     UIEdgeInsets safe = self.view.safeAreaInsets;
+    CGFloat viewportHeight = MAX(0, LQSActionRowTop(b.size.height, safe.bottom) - 8);
+    CGFloat expandedMediaHeight = _media.hasMedia ? [LQSMediaCard height] : 0;
+    CGFloat footerTop = LQSExpandedFooterTop(qsGridBottom, viewportHeight, expandedMediaHeight);
+    _qsScroll.frame = CGRectMake(0, 0, w, viewportHeight);
+    _qsScroll.contentSize = CGSizeMake(w, MAX(viewportHeight, footerTop + 48 + (_media.hasMedia ? 24 + expandedMediaHeight : 0)));
+    _qsScroll.scrollEnabled = q >= 0.999 && p >= 0.999 && !_brightnessMirroring;
+    _qsScroll.clipsToBounds = YES; // fixed viewport, never an interpolated tile edge
     // Pager/Edit belongs to QuickSettingsContent, not FooterActions.
-    _footer.frame = CGRectMake(inset, LQSFooterTop(b.size.height, safe.bottom) + qsOffset, w - 2 * inset, 48);
+    _footer.frame = CGRectMake(inset, footerTop + qsOffset, w - 2 * inset, 48);
     _footer.alpha = qsAlpha;
     _footer.userInteractionEnabled = q > 0.95;
     _dots.frame = _footer.bounds;
@@ -705,6 +740,7 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     _editButton.frame = CGRectMake(_footer.bounds.size.width - 48, 0, 48, 48);
     _editButton.hidden = !_settings.editorEnabled;
     _editor.frame = b;
+    _editor.topInset = safe.top > 0 ? safe.top : (gLandscape ? 0 : 20);
     CGFloat actionsLeft = MAX(inset, safe.left + 8), actionsRight = MAX(inset, safe.right + 8);
     CGFloat actionsTop = LQSActionRowTop(b.size.height, safe.bottom);
     // FooterActions expands its touch layout by 4dp on each side so the
@@ -717,12 +753,13 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 
     CGFloat qqsGridBottom = [self qqsTop] + qqsH;
     _media.hidden = !_media.hasMedia;
-    _media.frame = CGRectMake(inset, Lerp(qqsGridBottom + 16, qsGridBottom + 56, q), w - 2 * inset, [LQSMediaCard height]);
-    _media.alpha = 1 - Range(q, 0, 0.5);
-    _media.userInteractionEnabled = q < 0.05;
+    _media.frame = CGRectMake(inset, Lerp(qqsGridBottom + 16, footerTop + 48 + 16, q), w - 2 * inset,
+                             Lerp([self compactMediaHeight], [LQSMediaCard height], q));
+    _media.alpha = 1; // MediaCarousel is shared between QQS and QS.
+    _media.userInteractionEnabled = q < 0.05 || q > 0.95;
     // Android keeps stack position separate from QS translation: interpolate
     // stable top padding, then apply whole-shade expansion exactly once.
-    CGFloat nTop = LQSNotificationTop(p, q, [self qqsBottom] + 12, b.size.height);
+    CGFloat nTop = LQSNotificationTop(p, q, [self qqsBottom] + 12, b.size.height) + _overExpansion;
     CGFloat listHeight = LQSNotificationViewportHeight(p, b.size.height, nTop);
     _notificationArea.frame = CGRectMake(0, nTop, w, MAX(0, b.size.height - nTop));
     _notificationArea.hidden = _notifs.hidden || p <= 0.001;
@@ -734,6 +771,9 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     _notifs.alpha = ContentAlpha(p);
     _notifs.userInteractionEnabled = q < 0.05 || _listMode != 0;
     _notificationSurface.frame = _notificationArea.bounds;
+    if (_brightnessMirroring) {
+        for (UIView *v in @[_header, _gridClip, _footer, _actions, _media]) v.alpha = 0;
+    }
 }
 
 - (void)layoutTilesOnly {
@@ -813,7 +853,7 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     NSUInteger epoch = ++_editorEpoch;
     _editor = [[LQSEditor alloc] initWithFrame:self.view.bounds];
     LQSEditor *editor = _editor;
-    _editor.topInset = 20; // iPhone 8 status bar (statusBarsPadding)
+    _editor.topInset = self.view.safeAreaInsets.top > 0 ? self.view.safeAreaInsets.top : (gLandscape ? 0 : 20);
     __weak typeof(self) weakSelf = self;
     _editor.onExit = ^{
         LQSPanelViewController *s = weakSelf;
@@ -845,12 +885,14 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 - (void)setQ:(CGFloat)q {
     CGFloat previous = _q;
     _q = MAX(0, MIN(1, q));
+    if (_q < previous && _qsScroll.contentOffset.y > 0)
+        _qsScroll.contentOffset = CGPointMake(0, _qsScroll.contentOffset.y * _q / MAX(0.000001, previous));
     if (previous >= 0.999 && _q < 0.999) {
         [_pageLink invalidate]; _pageLink = nil;
         _qsPageCrossfade = _page >= 0.5;
         if (!_qsPageCrossfade) _page = 0;
     }
-    if (_q <= 0) { _page = 0; _qsPageCrossfade = NO; }
+    if (_q <= 0) { _page = 0; _qsPageCrossfade = NO; _qsScroll.contentOffset = CGPointZero; }
     else if (_q >= 1) _qsPageCrossfade = NO;
     // NSSL.setQsExpansionFraction resets the notification scroll as QS pushes
     // it out. Use a ratio so this is independent of the number of animation ticks.
@@ -935,7 +977,8 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     if (nativeSample) _nativeCoasting = YES;
     if (interactive || nativeSample || finishesNativeMotion || fabs(progress - _progress) < 0.001) {
         [_settleLink invalidate]; _settleLink = nil;
-        [_content.layer removeAnimationForKey:@"overshoot"];
+        _springBack = NO;
+        _overExpansion = 0;
         if (nativeSample) { _lastInteractiveTime = 0; _interactiveVelocity = 0; }
         [UIView performWithoutAnimation:^{ [self applyPresentationProgress:progress]; }];
         return;
@@ -948,9 +991,12 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     _lastInteractiveTime = 0;
     _interactiveVelocity = 0;
     BOOL opening = progress > _progress;
+    _springBack = NO;
+    _settleOverFrom = _overExpansion;
+    _settleOverTo = opening && !UIAccessibilityIsReduceMotionEnabled() ? LQSShadeOvershoot(velocity) : 0;
     // NPVC's classic unlocked shade: opening uses the post-loadDimens 0.4s
     // utility; dismissing uses max=0.5, speedUp=0.6, x2=0.6, y2=0.84.
-    _settleFling = LQSAndroidFling(_progress * height, progress * height, velocity, height,
+    _settleFling = LQSAndroidFling(_progress * height, progress * height + _settleOverTo, velocity, height,
                                  opening ? 0.4 : 0.5, opening ? 0 : 0.6,
                                  opening ? -1 : 0.6, opening ? 1 : 0.84);
     if (velocity == 0) {
@@ -959,16 +1005,6 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     }
     if (UIAccessibilityIsReduceMotionEnabled()) _settleFling.duration = 0.12;
     _settleDuration = MAX(0.001, _settleFling.duration);
-    [_content.layer removeAnimationForKey:@"overshoot"];
-    if (progress > _progress && !UIAccessibilityIsReduceMotionEnabled()) {
-        CAKeyframeAnimation *o = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.y"];
-        o.values = @[@0, @(16 * 0.6), @0];
-        o.keyTimes = @[@0, @0.4, @1];
-        o.timingFunctions = @[[CAMediaTimingFunction functionWithControlPoints:0.4 :0 :0.2 :1], [CAMediaTimingFunction functionWithControlPoints:0.4 :0 :0.2 :1]];
-        o.duration = _settleDuration + 0.4;
-        o.additive = YES;
-        [_content.layer addAnimation:o forKey:@"overshoot"];
-    }
     [_settleLink invalidate];
     _settleLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(settleTick:)];
     [_settleLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
@@ -977,11 +1013,27 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 - (void)settleTick:(CADisplayLink *)link {
     if (link != _settleLink) return;
     CGFloat f = MIN(1, (CACurrentMediaTime() - _settleStart) / _settleDuration);
+    if (_springBack) {
+        _overExpansion = _settleOverFrom * (1 - LQSCubic(0.4, 0, 0.2, 1, f));
+        [UIView performWithoutAnimation:^{ [self applyPresentationProgress:self->_settleTo]; }];
+        if (f >= 1 && link == _settleLink) {
+            [_settleLink invalidate]; _settleLink = nil; _springBack = NO;
+        }
+        return;
+    }
     CGFloat e = LQSFlingValue(_settleFling, f, LQSCubic);
+    // NPVC.createHeightAnimator adds over-expansion using FAST_OUT_SLOW_IN
+    // over the animator's eased fraction, then springs back separately for 400ms.
+    _overExpansion = Lerp(_settleOverFrom, _settleOverTo, LQSCubic(0.4, 0, 0.2, 1, e));
     [UIView performWithoutAnimation:^{
         [self applyPresentationProgress:self->_settleFrom + (self->_settleTo - self->_settleFrom) * e];
     }];
-    if (f >= 1 && link == _settleLink) { [_settleLink invalidate]; _settleLink = nil; }
+    if (f >= 1 && link == _settleLink) {
+        if (_settleOverTo > 0) {
+            _springBack = YES; _settleOverFrom = _overExpansion;
+            _settleStart = CACurrentMediaTime(); _settleDuration = 0.4;
+        } else { [_settleLink invalidate]; _settleLink = nil; }
+    }
 }
 
 - (void)applyPresentationProgress:(CGFloat)progress {
@@ -996,11 +1048,13 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     // Keep the existing alpha/parallax and hide content at the closed endpoint.
     _content.hidden = p <= 0.001;
     _content.alpha = ContentAlpha(p);
-    _content.transform = CGAffineTransformMakeTranslation(0, -0.175 * (1 - p) * [self qqsBottom]);
+    // Classic single shade centers QS using half the notification over-expansion.
+    _content.transform = CGAffineTransformMakeTranslation(0, -0.175 * (1 - p) * [self qqsBottom] + _overExpansion * 0.5);
     if (p <= 0.001) _notifs.scrollView.contentOffset = CGPointZero;
     if (p <= 0.001 && _editor) { [_editor removeFromSuperview]; _editor = nil; [self rebuildTiles]; }
     if (_editor) _content.alpha = 0;
     if (p <= 0.001) {
+        _overExpansion = 0; _springBack = NO;
         [_qLink invalidate]; _qLink = nil;
         [_pageLink invalidate]; _pageLink = nil;
         [_content.layer removeAnimationForKey:@"overshoot"];
@@ -1034,6 +1088,15 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 
 #pragma mark - Gestures
 
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (scrollView != _qsScroll || !_header) return;
+    // ShadeHeaderController.updateScrollY: the small-screen header's contents
+    // scroll away with QS; the landscape single-row header remains stationary.
+    CGRect bounds = _header.bounds;
+    bounds.origin.y = gLandscape ? 0 : MAX(0, scrollView.contentOffset.y);
+    _header.bounds = bounds;
+}
+
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g {
     if (_dialog.superview || _editor) return NO;
     if (g == _hpan) {
@@ -1044,7 +1107,17 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     if (g == _vpan) {
         CGPoint v = [_vpan velocityInView:self.view], loc = [_vpan locationInView:_content];
         if (fabs(v.y) <= fabs(v.x)) return NO;
-        if (CGRectContainsPoint(_brightness.frame, loc) && _q > 0.95 && fabs(v.x) > 0) return fabs(v.y) > 2 * fabs(v.x);
+        CGRect brightnessRect = [_brightness convertRect:_brightness.bounds toView:_content];
+        if (CGRectContainsPoint(brightnessRect, loc) && _q > 0.95 && fabs(v.x) > 0) return fabs(v.y) > 2 * fabs(v.x);
+        // Expanded QS scrolls its contents before handing an upward drag at the
+        // end back to the shade. Header pulls can always collapse QS directly.
+        CGPoint inScroll = [g locationInView:_qsScroll];
+        CGFloat maxScroll = MAX(0, _qsScroll.contentSize.height - _qsScroll.bounds.size.height);
+        if (_q >= 0.999 && maxScroll > 0 && !CGRectContainsPoint(_header.frame, loc)
+            && CGRectContainsPoint(_qsScroll.bounds, inScroll)) {
+            if ((v.y < 0 && _qsScroll.contentOffset.y < maxScroll - 0.5)
+                || (v.y > 0 && _qsScroll.contentOffset.y > 0.5)) return NO;
+        }
         // Inside the notification list the list's own pan handles it (listPan:).
         CGRect notificationRect = [_notifs convertRect:_notifs.bounds toView:self.view];
         if (_q < 0.05 && !_notificationArea.hidden && CGRectContainsPoint(notificationRect, [g locationInView:self.view])) return NO;
@@ -1066,8 +1139,9 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
             // Expanding QS must not freeze an unfinished whole-shade opening.
             // A closing settle is interrupted as before; an opening settle
             // continues alongside q until a whole-shade closing drag takes over.
-            if (_settleLink && _settleTo <= _progress) {
+            if (_settleLink && _settleTo < _settleFrom) {
                 [_settleLink invalidate]; _settleLink = nil;
+                _springBack = NO; _overExpansion = 0;
             }
             _qStart = _q;
             _pStart = _progress;
@@ -1077,6 +1151,7 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
                 if (_settleLink) {
                     _pStart = _progress - dy / MAX(1, self.view.bounds.size.height);
                     [_settleLink invalidate]; _settleLink = nil;
+                    _springBack = NO; _overExpansion = 0;
                     [_content.layer removeAnimationForKey:@"overshoot"];
                 }
                 // Collapsing from QQS closes the whole shade: follow the finger, the native CC
@@ -1117,8 +1192,9 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
             _pStart = _progress;
             [_qLink invalidate];
             _qLink = nil;
-            if (_settleLink && _settleTo <= _progress) {
+            if (_settleLink && _settleTo < _settleFrom) {
                 [_settleLink invalidate]; _settleLink = nil;
+                _springBack = NO; _overExpansion = 0;
             }
             break;
         case UIGestureRecognizerStateChanged: {
@@ -1131,6 +1207,7 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
                     _listMode = 2; _listModeY = ty;
                     _pStart = _progress;
                     [_settleLink invalidate]; _settleLink = nil;
+                    _springBack = NO; _overExpansion = 0;
                     [_content.layer removeAnimationForKey:@"overshoot"];
                 }
             }
