@@ -686,6 +686,7 @@ static NSString *BTKind(id dev) {
         id bt = Bluetooth();
         if (Has(bt, @"connectedDevices")) {
             NSArray *devs = ((id (*)(id, SEL))objc_msgSend)(bt, NSSelectorFromString(@"connectedDevices"));
+            if ([devs isKindOfClass:NSArray.class]) d[@"statusBluetoothConnected"] = @(devs.count > 0);
             id dev = [devs isKindOfClass:NSArray.class] ? devs.firstObject : nil;
             if (Has(dev, @"name")) {
                 d[@"btDevice"] = ((id (*)(id, SEL))objc_msgSend)(dev, NSSelectorFromString(@"name")) ?: @"";
@@ -695,6 +696,13 @@ static NSString *BTKind(id dev) {
 
         id f = Focus();
         id act = Has(f, @"activeActivity") ? ((id (*)(id, SEL))objc_msgSend)(f, NSSelectorFromString(@"activeActivity")) : nil;
+        if (Has(f, @"activeActivity")) d[@"statusDND"] = @(act != nil);
+        LQSBackendState airplane = [self hardwareStateFor:@"airplane"];
+        LQSBackendState rotation = [self hardwareStateFor:@"rotation"];
+        LQSBackendState ringer = [self hardwareStateFor:@"ringer"];
+        if (airplane >= 0) d[@"statusAirplane"] = @(airplane == LQSBackendStateOn);
+        if (rotation >= 0) d[@"statusRotationLocked"] = @(rotation == LQSBackendStateOff);
+        if (ringer >= 0) d[@"statusSilent"] = @(ringer == LQSBackendStateOff);
         for (NSString *k in @[@"activityDisplayName", @"displayName", @"name"]) {
             if ([act respondsToSelector:NSSelectorFromString(k)]) { id n = [act valueForKey:k]; if ([n isKindOfClass:NSString.class]) { d[@"focusName"] = n; break; } }
         }

@@ -639,6 +639,7 @@ static NSString *DataTypeIcon(NSString *t) {
     UILabel *_clock, *_date, *_bigClock, *_bigDate, *_carrier;
     UIView *_chip, *_bigChip;
     UIImageView *_wifi, *_signal, *_type, *_bigWifi, *_bigSignal, *_bigType;
+    NSArray<UIImageView *> *_statusIcons, *_bigStatusIcons;
     LQSBatteryView *_battery, *_bigBattery;
     UILabel *_bigPercent;
     NSDictionary *_info;
@@ -690,6 +691,18 @@ static NSString *DataTypeIcon(NSString *t) {
         _bigDate = [self label:14 weight:500 in:_expanded];
         _bigChip = [self chipIn:_expanded wifi:&_bigWifi signal:&_bigSignal type:&_bigType battery:&_bigBattery];
         _bigPercent = [self label:14 weight:500 in:_bigChip];
+        NSMutableArray *compactStatus = [NSMutableArray array], *expandedStatus = [NSMutableArray array];
+        for (NSInteger i = 0; i < 5; i++) {
+            for (NSInteger expanded = 0; expanded < 2; expanded++) {
+                UIImageView *icon = [UIImageView new];
+                icon.contentMode = UIViewContentModeScaleAspectFit;
+                icon.tintColor = [LQSTheme headerText];
+                icon.tag = 101; // optional status slot; connectivity/battery get priority
+                [(expanded ? _bigChip : _chip) addSubview:icon];
+                [(expanded ? expandedStatus : compactStatus) addObject:icon];
+            }
+        }
+        _statusIcons = compactStatus; _bigStatusIcons = expandedStatus;
         for (UILabel *l in @[_clock, _bigClock]) {
             l.userInteractionEnabled = YES;
             [l addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(clockTapped)]];
@@ -782,19 +795,39 @@ static NSString *DataTypeIcon(NSString *t) {
     NSString *carrier = [info[@"carrier"] isKindOfClass:NSString.class] ? info[@"carrier"] : @"";
     if (!sim) carrier = LQSL(@"keyguard_missing_sim_message_short");
     _carrier.text = carrier;
+    NSArray *keys = @[@"statusDND", @"statusSilent", @"statusRotationLocked", @"statusBluetoothConnected", @"statusAirplane"];
+    NSArray *icons = @[@"stat_sys_dnd", @"stat_sys_ringer_silent", @"stat_sys_rotate_portrait", @"stat_sys_data_bluetooth_connected", @"stat_sys_airplane_mode"];
+    NSArray *labels = @[LQSL(@"quick_settings_dnd_label"), LQSL(@"Silent mode"), LQSL(@"Rotation locked"),
+                        LQSL(@"quick_settings_bluetooth_label"), LQSL(@"airplane_mode")];
+    for (NSUInteger i = 0; i < keys.count; i++) {
+        UIImage *image = [info[keys[i]] boolValue] ? [LQSVectorIcon imageNamed:icons[i] height:16] : nil;
+        for (UIImageView *view in @[_statusIcons[i], _bigStatusIcons[i]]) {
+            view.image = image;
+            view.isAccessibilityElement = image != nil;
+            view.accessibilityLabel = labels[i];
+        }
+    }
+    if ([info[@"statusAirplane"] boolValue]) { _signal.image = _bigSignal.image = nil; _type.image = _bigType.image = nil; }
     [self setNeedsLayout];
 }
 
-static CGFloat LayoutChip(UIView *chip, NSArray<UIImageView *> *icons, LQSBatteryView *battery, UILabel *percent, CGFloat height) {
+static CGFloat LayoutChip(UIView *chip, NSArray<UIImageView *> *icons, LQSBatteryView *battery, UILabel *percent, CGFloat height, CGFloat maxWidth) {
+    CGSize bs = [battery sizeThatFits:CGSizeMake(0, 13)];
+    CGFloat required = 12 + bs.width;
+    if (percent) required += 4 + [percent sizeThatFits:CGSizeMake(100, height)].width;
+    for (UIImageView *iv in icons) if (iv.image && iv.tag != 101) required += iv.image.size.width + 4;
+    CGFloat optional = MAX(0, maxWidth - required);
     CGFloat x = 6; // chip padding horizontal 6dp
     for (UIImageView *iv in icons) {
-        if (!iv.image) { iv.frame = CGRectZero; continue; }
+        BOOL fits = iv.tag != 101 || iv.image.size.width + 4 <= optional;
+        iv.hidden = !iv.image || !fits;
+        if (iv.hidden) { iv.frame = CGRectZero; continue; }
+        if (iv.tag == 101) optional -= iv.image.size.width + 4;
         CGSize s = iv.image.size; // natural size, vertically centred
         iv.frame = CGRectMake(x, round((height - s.height) / 2 * 2) / 2, s.width, s.height);
         x = CGRectGetMaxX(iv.frame) + 4; // status icon spacing (assumption: 4dp)
     }
     x -= 1; // StatusIcons paddingEnd 3sp after the last icon
-    CGSize bs = [battery sizeThatFits:CGSizeMake(0, 13)];
     battery.frame = CGRectMake(x, (height - 13) / 2, bs.width, 13);
     [battery setNeedsDisplay];
     x = CGRectGetMaxX(battery.frame);
@@ -818,7 +851,9 @@ static CGFloat LayoutChip(UIView *chip, NSArray<UIImageView *> *icons, LQSBatter
     _clock.frame = CGRectMake(pad, (ch - 20) / 2, cs.width, 20);
     CGSize ds = [_date sizeThatFits:CGSizeMake(200, ch)];
     _date.frame = CGRectMake(CGRectGetMaxX(_clock.frame) + 8, (ch - 20) / 2, ds.width, 20);
-    CGFloat chipW = LayoutChip(_chip, @[_type, _signal, _wifi], _battery, nil, 24);
+    NSArray *compactIcons = [_statusIcons arrayByAddingObjectsFromArray:@[_type, _signal, _wifi]];
+    CGFloat compactBudget = MAX(0, w - 2 * pad - cs.width - MIN(ds.width, w * 0.35) - 16);
+    CGFloat chipW = LayoutChip(_chip, compactIcons, _battery, nil, 24, compactBudget);
     _chip.frame = CGRectMake(w - pad - chipW + 6, (ch - 24) / 2, chipW, 24);
     CGRect dateFrame = _date.frame;
     dateFrame.size.width = MIN(dateFrame.size.width, MAX(0, CGRectGetMinX(_chip.frame) - 8 - dateFrame.origin.x));
@@ -831,7 +866,9 @@ static CGFloat LayoutChip(UIView *chip, NSArray<UIImageView *> *icons, LQSBatter
     _carrier.frame = CGRectMake(w - pad - 180, top + (bigH - 20) / 2, 180, 20);
     CGSize bds = [_bigDate sizeThatFits:CGSizeMake(220, 20)];
     _bigDate.frame = CGRectMake(pad, eh - rowDate, bds.width, rowDate);
-    CGFloat bigChipW = LayoutChip(_bigChip, @[_bigType, _bigSignal, _bigWifi], _bigBattery, _bigPercent, 24);
+    NSArray *expandedIcons = [_bigStatusIcons arrayByAddingObjectsFromArray:@[_bigType, _bigSignal, _bigWifi]];
+    CGFloat expandedBudget = MAX(0, w - 2 * pad - MIN(bds.width, w * 0.3) - 8);
+    CGFloat bigChipW = LayoutChip(_bigChip, expandedIcons, _bigBattery, _bigPercent, 24, expandedBudget);
     _bigChip.frame = CGRectMake(w - pad - bigChipW + 6, eh - rowDate - 2, bigChipW, 24);
     CGRect bigDateFrame = _bigDate.frame;
     bigDateFrame.size.width = MIN(bigDateFrame.size.width, MAX(0, CGRectGetMinX(_bigChip.frame) - 8 - pad));

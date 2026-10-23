@@ -505,6 +505,31 @@ Sources:
 
 ## 15. Android 17 consistency pass (2026-10-23)
 
+### Expanded status information
+
+The header previously rendered only Wi-Fi, cellular/data type and battery.
+It now also supports connected Bluetooth, Focus/DND, silent mode, rotation lock
+and airplane mode using actual hardware/read-only backend state. Unsupported
+states are omitted, and Bluetooth means a connected device rather than merely
+an enabled radio. Airplane mode suppresses cellular/data-type glyphs without
+hiding Wi-Fi that remains connected.
+
+Compact and expanded headers budget optional slots around essential
+connectivity/battery icons and date text; the expanded row has its own wider
+budget, carrier row and separate battery percentage. Slots only appear when
+active and when they fit, rather than permanently adding every indicator on
+expansion. Existing large-tile secondary text continues to show SSID, Bluetooth
+device/battery or Focus name where available. Icon-only tiles remain icon-only;
+no battery-time estimate or unavailable iOS state is invented.
+
+The new static status glyphs come from `PhoneStatusBarPolicy`'s A17 resources;
+inset wrappers are flattened when exporting the JSON without changing their
+visible padding. This remains a subset of Android's status pipeline, not an
+alarm/VPN/privacy/multi-SIM implementation.
+
+Reference: [PhoneStatusBarPolicy](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/statusbar/phone/PhoneStatusBarPolicy.java)
+and [ShadeHeaderController](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/shade/ShadeHeaderController.kt).
+
 Target: LineageOS `lineage-24.0` classic single shade with Compose QS content.
 This is not a claim that every Android 17 device enables the same scene/blur/
 media flags. UIKit still supplies native gesture protection, material rendering,
