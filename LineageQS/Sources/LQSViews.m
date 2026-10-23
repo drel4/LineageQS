@@ -2,6 +2,7 @@
 #import "LQSViews.h"
 #import "LQSTheme.h"
 #import "LQSVectorIcon.h"
+#import "LQSLayout.h"
 
 void LQSHapticTick(void) {
     if (![LQSSettings current].haptics) return;
@@ -644,6 +645,7 @@ static NSString *DataTypeIcon(NSString *t) {
     UILabel *_bigPercent;
     NSDictionary *_info;
     NSTimer *_timer;
+    CGRect _compactDateFrame, _expandedDateFrame, _compactChipFrame, _expandedChipFrame;
 }
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
@@ -692,7 +694,7 @@ static NSString *DataTypeIcon(NSString *t) {
         _bigChip = [self chipIn:_expanded wifi:&_bigWifi signal:&_bigSignal type:&_bigType battery:&_bigBattery];
         _bigPercent = [self label:14 weight:500 in:_bigChip];
         NSMutableArray *compactStatus = [NSMutableArray array], *expandedStatus = [NSMutableArray array];
-        for (NSInteger i = 0; i < 5; i++) {
+        for (NSInteger i = 0; i < 4; i++) {
             for (NSInteger expanded = 0; expanded < 2; expanded++) {
                 UIImageView *icon = [UIImageView new];
                 icon.contentMode = UIViewContentModeScaleAspectFit;
@@ -795,9 +797,9 @@ static NSString *DataTypeIcon(NSString *t) {
     NSString *carrier = [info[@"carrier"] isKindOfClass:NSString.class] ? info[@"carrier"] : @"";
     if (!sim) carrier = LQSL(@"keyguard_missing_sim_message_short");
     _carrier.text = carrier;
-    NSArray *keys = @[@"statusDND", @"statusSilent", @"statusRotationLocked", @"statusBluetoothConnected", @"statusAirplane"];
-    NSArray *icons = @[@"stat_sys_dnd", @"stat_sys_ringer_silent", @"stat_sys_rotate_portrait", @"stat_sys_data_bluetooth_connected", @"stat_sys_airplane_mode"];
-    NSArray *labels = @[LQSL(@"quick_settings_dnd_label"), LQSL(@"Silent mode"), LQSL(@"Rotation locked"),
+    NSArray *keys = @[@"statusDND", @"statusSilent", @"statusBluetoothConnected", @"statusAirplane"];
+    NSArray *icons = @[@"stat_sys_dnd", @"stat_sys_ringer_silent", @"stat_sys_data_bluetooth_connected", @"stat_sys_airplane_mode"];
+    NSArray *labels = @[LQSL(@"quick_settings_dnd_label"), LQSL(@"Silent mode"),
                         LQSL(@"quick_settings_bluetooth_label"), LQSL(@"airplane_mode")];
     for (NSUInteger i = 0; i < keys.count; i++) {
         UIImage *image = [info[keys[i]] boolValue] ? [LQSVectorIcon imageNamed:icons[i] height:16] : nil;
@@ -873,6 +875,8 @@ static CGFloat LayoutChip(UIView *chip, NSArray<UIImageView *> *icons, LQSBatter
     CGRect bigDateFrame = _bigDate.frame;
     bigDateFrame.size.width = MIN(bigDateFrame.size.width, MAX(0, CGRectGetMinX(_bigChip.frame) - 8 - pad));
     _bigDate.frame = bigDateFrame;
+    _compactDateFrame = _date.frame; _expandedDateFrame = _bigDate.frame;
+    _compactChipFrame = _chip.frame; _expandedChipFrame = _bigChip.frame;
     [self applyExpansion];
 }
 
@@ -895,8 +899,23 @@ static CGFloat LayoutChip(UIView *chip, NSArray<UIImageView *> *icons, LQSBatter
     CGFloat carrierStart = MAX(self.bounds.size.width - [LQSTheme sideInset] - 180, CGRectGetMaxX(_clock.frame) + 16);
     CGRect carrier = _carrier.frame;
     carrier.origin.x = carrierStart;
+    carrier.origin.y = CGRectGetMidY(_clock.frame) - carrier.size.height / 2;
     carrier.size.width = MAX(0, self.bounds.size.width - [LQSTheme sideInset] - carrierStart);
     _carrier.frame = carrier;
+    // The two formats fade separately, but follow the same MotionScene path.
+    // Interpolate centers (not left edges) and sizes like deltaRelative keys.
+    LQSHeaderKeyPosition position = LQSHeaderPosition(e);
+    CGRect (^frame)(CGRect, CGRect) = ^CGRect(CGRect from, CGRect to) {
+        CGFloat width = from.size.width + (to.size.width - from.size.width) * position.size;
+        CGFloat height = from.size.height + (to.size.height - from.size.height) * position.size;
+        CGFloat centerX = CGRectGetMidX(from) + (CGRectGetMidX(to) - CGRectGetMidX(from)) * position.x;
+        CGFloat centerY = CGRectGetMidY(from) + (CGRectGetMidY(to) - CGRectGetMidY(from)) * position.y;
+        return CGRectMake(centerX - width / 2, centerY - height / 2, width, height);
+    };
+    if (!CGRectIsEmpty(_compactDateFrame)) {
+        _date.frame = _bigDate.frame = frame(_compactDateFrame, _expandedDateFrame);
+        _chip.frame = _bigChip.frame = frame(_compactChipFrame, _expandedChipFrame);
+    }
     _collapsed.alpha = 1 - MIN(1, e / 0.14);
     _expanded.alpha = MAX(0, (e - 0.58) / 0.42);
     _collapsed.userInteractionEnabled = e < 0.5;

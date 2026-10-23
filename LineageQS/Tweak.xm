@@ -26,7 +26,6 @@
 #import "Sources/LQSNotifications.h"
 #import "Sources/LQSStrings.h"
 #import "Sources/LQSGrabberGeometry.h"
-#import "Sources/LQSAuthentication.h"
 
 @interface CCUIModularControlCenterOverlayViewController : UIViewController
 - (void)beginPresentationWithLocation:(CGPoint)l translation:(CGPoint)t velocity:(CGPoint)v;
@@ -65,9 +64,6 @@ static BOOL gEnabled;           // master switch (live)
 static BOOL gDisabledHard;      // kill switch / crash guard / exception
 static __weak CCUIModularControlCenterOverlayViewController *gOverlay;
 static LQSPanelViewController *gPanel;
-static __weak LQSPanelViewController *gAuthenticationPanel;
-static BOOL gRestoreQSAfterAuthentication;
-static BOOL gRestoringQSAfterAuthentication;
 static __weak UIView *gControlledMaterial;
 static double gMaterialProgress;
 
@@ -174,15 +170,6 @@ static void SetSystemBackdropProgress(UIViewController *overlay, CGFloat progres
 %end
 %end
 
-%group LQSUnlockEmergencyCancel
-%hook SBLockScreenManager
-- (void)passcodeEntryTransientOverlayViewControllerRequestsEmergencyCall:(id)controller {
-    [LQSAuthentication cancel];
-    %orig;
-}
-%end
-%end
-
 // Native views replaced by the panel. Their own alpha animations keep
 // running; we only force hidden while our panel is installed.
 static void SetNativeContentHidden(UIViewController *overlay, BOOL hidden) {
@@ -211,7 +198,6 @@ static void SetNativeContentHidden(UIViewController *overlay, BOOL hidden) {
 static LQSDismissProxy *gProxy;
 
 static void Uninstall(NSString *why) {
-    [LQSAuthentication cancel];
     CCUIModularControlCenterOverlayViewController *ov = gOverlay;
     if (gPanel) {
         @try {
@@ -313,14 +299,6 @@ static void ReloadPrefs(void) {
     if (!gPanel && gEnabled && !gDisabledHard) { gOverlay = self; Install(self); }
     %orig;
     if (gPanel && gPanel.parentViewController == self) {
-        if ([LQSAuthentication isPending] || gRestoringQSAfterAuthentication) {
-            // iOS may change CC's native window beneath its passcode overlay.
-            // Keep the current QS state/page/scroll rather than closing/resetting
-            // our panel; native presentation is restored when that overlay ends.
-            SetNativeContentHidden(self, YES);
-            [gPanel refreshPresentationBackdrop];
-            return;
-        }
         @try {
             SetNativeContentHidden(self, YES);
             double p = [[state valueForKey:@"presentationProgress"] doubleValue];
@@ -805,10 +783,7 @@ static void WithTopGrabberVisualEdge(SBGrabberTongue *tongue, void (^calculate)(
     // Native shouldBegin can prepare/show the arrow, before _handlePullGesture:.
     if ([g isKindOfClass:UIPanGestureRecognizer.class]) CaptureTopGrabberVisualEdge(self, (UIPanGestureRecognizer *)g);
     BOOL r = %orig;
-    // Keep the native CC entry gesture available while locked, even when the
-    // unlocked Android-style mode disables it. Native lock-screen CC access
-    // settings and all other native gesture eligibility checks still apply.
-    if (r && !gBottomSwipe && !LQSDeviceIsLocked()) {
+    if (r && !gBottomSwipe) {
         SBControlCenterController *cc = [objc_getClass("SBControlCenterController") sharedInstanceIfExists];
         if (cc && [cc grabberTongue] == (id)self) {
             NLog(@"bottom CC grabber blocked");
@@ -858,15 +833,6 @@ static void WithTopGrabberVisualEdge(SBGrabberTongue *tongue, void (^calculate)(
     RouteTopGesture(g, UIGestureRecognizerStateCancelled);
     gRoutedGesture = nil;
 }
-%end
-
-%group LQSUILockState
-%hook SBLockScreenManager
-- (void)_setUILocked:(BOOL)locked {
-    %orig;
-    [LQSAuthentication lockStateDidChange];
-}
-%end
 %end
 
 static void DebugCommand(NSString *cmd) {
@@ -1034,56 +1000,6 @@ static void RegisterDarwin(NSString *name, void (^block)(void)) {
             [gPanel reloadFromPreferences];
             NLog(@"layout reset");
         });
-        RegisterDarwin(@"com.apple.springboard.lockstate", ^{ [LQSAuthentication lockStateDidChange]; });
-        // Only observe the real lock setter if the runtime scalar ABI matches.
-        Method lockSetter = class_getInstanceMethod(objc_getClass("SBLockScreenManager"), NSSelectorFromString(@"_setUILocked:"));
-        if (lockSetter && method_getNumberOfArguments(lockSetter) == 3) {
-            char *argument = method_copyArgumentType(lockSetter, 2);
-            char *result = method_copyReturnType(lockSetter);
-            BOOL compatible = argument && (argument[0] == 'B' || argument[0] == 'c') && result && result[0] == 'v';
-            free(argument); free(result);
-            if (compatible) { %init(LQSUILockState); }
-        }
-        Method emergency = class_getInstanceMethod(objc_getClass("SBLockScreenManager"),
-            NSSelectorFromString(@"passcodeEntryTransientOverlayViewControllerRequestsEmergencyCall:"));
-        if (emergency && method_getNumberOfArguments(emergency) == 3) {
-            char *argument = method_copyArgumentType(emergency, 2);
-            char *result = method_copyReturnType(emergency);
-            BOOL compatible = argument && argument[0] == '@' && result && result[0] == 'v';
-            free(argument); free(result);
-            if (compatible) { %init(LQSUnlockEmergencyCancel); }
-        }
-        [NSNotificationCenter.defaultCenter addObserverForName:LQSAuthenticationWillBeginNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-            SBControlCenterController *cc = [objc_getClass("SBControlCenterController") sharedInstanceIfExists];
-            gAuthenticationPanel = gPanel;
-            gRestoreQSAfterAuthentication = gPanel && [cc isPresented];
-        }];
-        [NSNotificationCenter.defaultCenter addObserverForName:LQSAuthenticationDidFinishNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-            SBControlCenterController *cc = [objc_getClass("SBControlCenterController") sharedInstanceIfExists];
-            BOOL restore = gRestoreQSAfterAuthentication && [note.userInfo[@"restore"] boolValue]
-                && LQSDeviceScreenIsOn() && gEnabled && !gDisabledHard && gPanel && gPanel == gAuthenticationPanel;
-            gRestoreQSAfterAuthentication = NO; gAuthenticationPanel = nil;
-            if (!restore) {
-                if (gPanel && ![cc isPresented]) [gPanel setPresentationProgress:0 interactive:YES];
-                return;
-            }
-            gRestoringQSAfterAuthentication = YES;
-            @try {
-                SEL canPresent = NSSelectorFromString(@"canBePresented");
-                NSMethodSignature *sig = [cc methodSignatureForSelector:canPresent];
-                BOOL allowed = [cc isPresented] || ([cc respondsToSelector:canPresent] && sig.numberOfArguments == 2
-                    && (sig.methodReturnType[0] == 'B' || sig.methodReturnType[0] == 'c')
-                    && ((BOOL (*)(id, SEL))objc_msgSend)(cc, canPresent));
-                if (allowed && ![cc isPresented]) [cc presentAnimated:NO];
-            } @catch (__unused NSException *exception) { }
-            __weak LQSPanelViewController *expectedPanel = gPanel;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 10), dispatch_get_main_queue(), ^{
-                if (gPanel && gPanel == expectedPanel)
-                    [gPanel setPresentationProgress:[cc isPresented] ? 1 : 0 interactive:YES];
-                gRestoringQSAfterAuthentication = NO;
-            });
-            [LQSAuthentication lockStateDidChange];
-        }];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ if (gEnabled) Install(CurrentOverlay()); });
         for (NSString *cmd in @[@"present", @"dismiss", @"expanded", @"compact", @"editor", @"snapshot", @"backend", @"dialogwifi", @"dialogbt", @"notifs", @"qs", @"screen", @"gestures"]) {
             RegisterDarwin([@"com.makr.lineageqs/debug-" stringByAppendingString:cmd], ^{ DebugCommand(cmd); });

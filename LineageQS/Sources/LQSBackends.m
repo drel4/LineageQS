@@ -1,7 +1,6 @@
 #import "LQSStrings.h"
 #import "LQSBackends.h"
 #import "LQSModel.h"
-#import "LQSAuthentication.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -312,7 +311,6 @@ static BOOL gRecordingStateKnown, gRecordingOn;
 }
 
 + (BOOL)setOn:(BOOL)on forIdentifier:(NSString *)ident {
-    if (LQSDeviceIsLocked() && LQSRequiresUnlock(ident)) return NO;
     if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return NO;
     if ([ident isEqualToString:@"screenrecord"]) {
         if (gCountdownTimer) {
@@ -326,7 +324,7 @@ static BOOL gRecordingStateKnown, gRecordingOn;
             if ([self hardwareStateFor:ident] == LQSBackendStateOn) return YES;
             gCountdownDeadline = NSProcessInfo.processInfo.systemUptime + 3;
             gCountdownTimer = [NSTimer timerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *t) {
-                if (![self realActionsEnabled] || ![LQSSettings current].enabled || LQSDeviceIsLocked()) {
+                if (![self realActionsEnabled] || ![LQSSettings current].enabled) {
                     [t invalidate]; gCountdownTimer = nil; gCountdownDeadline = 0;
                     [self postChanged];
                     return;
@@ -405,7 +403,6 @@ static BOOL gRecordingStateKnown, gRecordingOn;
 }
 
 + (BOOL)setHardwareOn:(BOOL)on forIdentifier:(NSString *)ident {
-    if (LQSDeviceIsLocked() && LQSRequiresUnlock(ident)) return NO;
     @try {
         if ([ident isEqualToString:@"wifi"]) { id w = WiFi(); if (Has(w, @"setWiFiEnabled:")) { SetBool(w, @"setWiFiEnabled:", on); return YES; } }
         if ([ident isEqualToString:@"bt"]) {
@@ -465,7 +462,6 @@ static BOOL gRecordingStateKnown, gRecordingOn;
 }
 
 + (LQSBackendState)activate:(NSString *)ident {
-    if (LQSDeviceIsLocked() && LQSRequiresUnlock(ident)) return [self stateFor:ident];
     NSString *bundle = LaunchBundleFor(ident);
     if (bundle) {
         Class ws = NSClassFromString(@"LSApplicationWorkspace");
@@ -499,7 +495,6 @@ static BOOL gRecordingStateKnown, gRecordingOn;
 }
 
 + (BOOL)openSettingsFor:(NSString *)ident {
-    if (LQSDeviceIsLocked()) return NO;
     NSString *u = [self settingsURLFor:ident];
     if (!u) return NO;
     NSURL *url = [NSURL URLWithString:u];
@@ -580,7 +575,6 @@ static void WiFiAssocCallback(WiFiRef device, WiFiRef network, void *a, void *b,
 }
 
 + (BOOL)joinWiFi:(NSString *)ssid {
-    if (LQSDeviceIsLocked()) return NO;
     WIFI_FN(CFArrayRef, WiFiManagerClientCopyNetworks, WiFiRef);
     WIFI_FN(void, WiFiDeviceClientAssociateAsync, WiFiRef, WiFiRef, void (*)(WiFiRef, WiFiRef, void *, void *, void *), void *);
     WiFiRef dev = WiFiDevice();
@@ -597,7 +591,6 @@ static void WiFiAssocCallback(WiFiRef device, WiFiRef network, void *a, void *b,
 }
 
 + (void)disconnectWiFi {
-    if (LQSDeviceIsLocked()) return;
     WIFI_FN(int, WiFiDeviceClientDisassociate, WiFiRef);
     WiFiRef dev = WiFiDevice();
     if (dev && WiFiDeviceClientDisassociate_) WiFiDeviceClientDisassociate_(dev);
@@ -636,7 +629,6 @@ static NSString *BTKind(id dev) {
 }
 
 + (BOOL)setBluetoothDevice:(NSString *)address connected:(BOOL)connected {
-    if (LQSDeviceIsLocked()) return NO;
     id bt = Bluetooth();
     if (!Has(bt, @"deviceFromAddressString:")) return NO;
     id d = ((id (*)(id, SEL, id))objc_msgSend)(bt, NSSelectorFromString(@"deviceFromAddressString:"), address);
@@ -706,10 +698,8 @@ static NSString *BTKind(id dev) {
         id act = Has(f, @"activeActivity") ? ((id (*)(id, SEL))objc_msgSend)(f, NSSelectorFromString(@"activeActivity")) : nil;
         if (Has(f, @"activeActivity")) d[@"statusDND"] = @(act != nil);
         LQSBackendState airplane = [self hardwareStateFor:@"airplane"];
-        LQSBackendState rotation = [self hardwareStateFor:@"rotation"];
         LQSBackendState ringer = [self hardwareStateFor:@"ringer"];
         if (airplane >= 0) d[@"statusAirplane"] = @(airplane == LQSBackendStateOn);
-        if (rotation >= 0) d[@"statusRotationLocked"] = @(rotation == LQSBackendStateOff);
         if (ringer >= 0) d[@"statusSilent"] = @(ringer == LQSBackendStateOff);
         for (NSString *k in @[@"activityDisplayName", @"displayName", @"name"]) {
             if ([act respondsToSelector:NSSelectorFromString(k)]) { id n = [act valueForKey:k]; if ([n isKindOfClass:NSString.class]) { d[@"focusName"] = n; break; } }

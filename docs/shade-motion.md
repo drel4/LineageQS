@@ -505,11 +505,28 @@ Sources:
 
 ## 15. Android 17 consistency pass (2026-10-23)
 
+The experimental locked-QS/passcode flow was removed at the contributor's
+request after it displayed only blur on the device. Native lock-screen behavior
+is restored; the tweak no longer installs its unlock coordinator or action gates.
+
+Date and status icons now interpolate their centers and sizes through the
+classic header's deltaRelative position keyframes: at 14% use x=0, y=0.1066
+and the compact size; at 50% use x=1, y=0.5 and the expanded size; then continue
+vertically to the expanded endpoint. Both formats follow this same path with
+the existing 14%/58% fade boundaries instead of two stationary endpoints.
+Carrier text follows the moving clock's vertical center. Cached endpoint frames
+are recomputed on layout, never accumulated from previous animation samples.
+
+Rotation lock remains available as a tile, but its header indicator is omitted
+by request. Android's `PhoneStatusBarPolicy.onRotationLockStateChanged` does
+define that status slot; this is a presentation preference, not a claim that
+Android has no rotation-lock indicator.
+
 ### Expanded status information
 
 The header previously rendered only Wi-Fi, cellular/data type and battery.
-It now also supports connected Bluetooth, Focus/DND, silent mode, rotation lock
-and airplane mode using actual hardware/read-only backend state. Unsupported
+It now also supports connected Bluetooth, Focus/DND, silent mode and airplane
+mode using actual hardware/read-only backend state. Unsupported
 states are omitted, and Bluetooth means a connected device rather than merely
 an enabled radio. Airplane mode suppresses cellular/data-type glyphs without
 hiding Wi-Fi that remains connected.
@@ -572,46 +589,3 @@ Primary references:
 - [Compose QS hierarchy and scroller](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/qs/composefragment/QSFragmentCompose.kt)
 - [Media constants and shared element](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/media/remedia/ui/compose/Media.kt)
 - [Shade fling and spring-back](https://github.com/LineageOS/android_frameworks_base/blob/lineage-24.0/packages/SystemUI/src/com/android/systemui/shade/NotificationPanelViewController.java)
-
-## 16. Locked QS and protected actions
-
-The native CC entry gesture is no longer disabled by the top-only gesture setting
-while SpringBoard is locked. On SE/home-button devices this retains the upward
-native entry; iOS's own lock-screen CC access and other presentation restrictions
-still apply. The tweak does not globally falsify the device lock state or force
-`canBePresented` to true.
-
-Default policy is a small allowlist: brightness, flashlight and rotation.
-Other tiles, unknown identifiers, recording, details, app/settings navigation
-and editing require unlock. Both UI entry points and backend mutation/launch
-methods enforce the policy. Recording countdowns abort on relock. Relocking
-closes details/editor, hides the raw custom notification list and replaces it
-with a generic unlock control; private tile secondary text is also hidden.
-Notification open/clear operations recheck lock state in the dispatcher bridge.
-Standard media play/seek controls remain available as on the native lock screen.
-
-`LQSAuthentication` requests SpringBoard's native `setPasscodeVisible:animated:`
-(or its underscored variant), checking argument/return ABI and cancellation
-visibility support first. It neither receives nor validates a passcode itself.
-Success is only the actual `SBLockScreenManager.isUILocked == NO` state, checked
-again before resuming the action. Cancellation, screen-off, unsupported selectors,
-unknown lock state and timeout do not authorize any operation. A second tap while
-an authentication request is pending does not queue a second action.
-
-During the native passcode transaction, the panel retains its current expansion,
-page and scroll. If iOS hides the CC window under its passcode UI, it is restored
-through native presentation eligibility before the action callback; the short
-restoration transition cannot reset the retained panel state. The native window
-is never held above the passcode UI. User-initiated app/settings navigation can
-still dismiss QS after authentication. Disabling the tweak cancels pending work.
-
-The production C policy/poll decisions have an external regression harness:
-allowlisted/sensitive/unknown/null identifiers; no successful decision while
-still locked; cancellation, no-presentation timeout, long timeout and screen-off.
-Native passcode presentation/window restoration still require device testing.
-No custom PIN entry or authentication-result hook is installed.
-
-Runtime interface references: [SBLockScreenManager](https://github.com/MTACS/iOS-17-Runtime-Headers/blob/main/PrivateFrameworks/SpringBoard.framework/SBLockScreenManager.h)
-and [SBControlCenterController](https://github.com/MTACS/iOS-17-Runtime-Headers/blob/main/PrivateFrameworks/SpringBoard.framework/SBControlCenterController.h).
-These headers inform guarded selectors, not a guarantee of their presence on
-every supported iOS build.

@@ -7,7 +7,7 @@ LQSGrabberGeometry.h and fixed-screen grabber touch capture adapt DroidSB's
 transient-bar geometry. Copyright 2026 drel4. Licensed under Apache-2.0.
 
 Status-bar vector resources (stat_sys_data_bluetooth_connected, stat_sys_dnd,
-stat_sys_ringer_silent, stat_sys_rotate_portrait) adapt Android framework/SystemUI
+stat_sys_ringer_silent) adapt Android framework/SystemUI
 drawables from LineageOS lineage-24.0. Copyright The Android Open Source Project,
 licensed under Apache-2.0. Inset drawables are flattened for the JSON renderer.
 Sources: packages/SystemUI/res/drawable/ and core/res/res/drawable/ic_qs_dnd.xml

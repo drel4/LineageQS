@@ -1,6 +1,19 @@
 #pragma once
 #include <math.h>
 
+typedef struct { double x, y, size; } LQSHeaderKeyPosition;
+// combined_qs_header_scene.xml: date/status center and size keyframes at
+// 0%, 14% (0,0.1066,size=0), 50% (1,0.5,size=1), then 100%.
+static inline LQSHeaderKeyPosition LQSHeaderPosition(double expansion) {
+    double q = fmax(0, fmin(1, expansion));
+    if (q <= 0.14) return (LQSHeaderKeyPosition){0, 0.1066 * q / 0.14, 0};
+    if (q < 0.5) {
+        double t = (q - 0.14) / 0.36;
+        return (LQSHeaderKeyPosition){t, 0.1066 + (0.5 - 0.1066) * t, t};
+    }
+    return (LQSHeaderKeyPosition){1, q, 1};
+}
+
 // FromQuickQuickSettingsToQuickSettings: QS-only content enters over [0.43,1].
 static inline double LQSExpansionContentAlpha(double expansion) {
     return fmax(0, fmin(1, (expansion - 0.43) / 0.57));
