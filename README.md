@@ -13,6 +13,13 @@ It replaces the Control Center view, and a swipe from the top opens it.
 
 Visual tokens, animations and behaviour come from the AOSP / LineageOS sources. Values are referenced in comments, `docs/` lists the research.
 
+## Lock-screen QS
+
+- The native Control Center gesture stays available while locked, including an upward swipe on iPhone SE (2016), even when the unlocked layout uses top-down activation. iOS must allow Control Center access on the lock screen.
+- Brightness, flashlight and rotation work without unlocking. Connectivity changes, recording, Settings/apps, details and editing require unlock.
+- Protected controls request the native passcode screen. QS state is retained during authentication; the requested action runs only after a real unlock. Cancelling does not run it.
+- Notification content is hidden behind an unlock button while locked. Standard lock-screen media controls remain available.
+
 ## Build
 - Theos with the iOS 16.5 SDK.
 - Deployment target: iOS 15.0. The SDK version is not the minimum supported OS; optional private APIs are resolved at runtime.

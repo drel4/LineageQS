@@ -12,6 +12,7 @@
 #import "LQSMediaCard.h"
 #import "LQSLayout.h"
 #import "LQSFling.h"
+#import "LQSAuthentication.h"
 
 NSString *const LQSLiveInfoChangedNotification = @"LQSLiveInfoChangedNotification";
 
@@ -106,6 +107,7 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     LQSHeaderView *_header;
     LQSBrightnessView *_brightness;
     LQSNotificationStack *_notifs;
+    UIButton *_lockedNotifications;
     LQSPageDots *_dots;
     UILabel *_feedback;
     LQSIconButton *_editButton, *_settingsButton, *_powerButton;
@@ -214,12 +216,17 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     __weak typeof(self) weakSelf = self;
     _notifs.requestDismiss = ^{ [weakSelf.delegate panelRequestsDismiss:weakSelf]; };
     _notifs.openSettingsURL = ^(NSString *url) {
-        UIApplication *app = UIApplication.sharedApplication;
-        SEL sbOpen = NSSelectorFromString(@"applicationOpenURL:");
-        if ([app respondsToSelector:sbOpen]) ((void (*)(id, SEL, id))objc_msgSend)(app, sbOpen, [NSURL URLWithString:url]);
-        [weakSelf.delegate panelRequestsDismiss:weakSelf];
+        [weakSelf openSettingsURL:url];
     };
     [_notificationArea addSubview:_notifs];
+    _lockedNotifications = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_lockedNotifications setTitle:LQSL(@"Unlock to view notifications") forState:UIControlStateNormal];
+    [_lockedNotifications setTitleColor:[LQSTheme onSurface] forState:UIControlStateNormal];
+    _lockedNotifications.titleLabel.font = [LQSTheme sansWithSize:14 weight:500];
+    _lockedNotifications.titleLabel.numberOfLines = 2;
+    _lockedNotifications.titleLabel.textAlignment = NSTextAlignmentCenter;
+    [_lockedNotifications addTarget:self action:@selector(unlockNotifications) forControlEvents:UIControlEventTouchUpInside];
+    [_notificationArea addSubview:_lockedNotifications];
     _media = [LQSMediaCard new];
     _media.onChange = ^{ [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:1 initialSpringVelocity:0 options:UIViewAnimationOptionAllowUserInteraction animations:^{ [weakSelf.view setNeedsLayout]; [weakSelf.view layoutIfNeeded]; } completion:nil]; };
     _qsScroll = [LQSContentScrollView new];
@@ -242,7 +249,13 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 
     _brightness = [LQSBrightnessView new];
     _brightness.value = [LQSModel shared].mockBrightness;
-    _brightness.onAutoToggle = ^(BOOL on) { [weakSelf openSettingsURL:@"prefs:root=DISPLAY"]; }; // iOS auto-brightness toggle: Settings (no safe setter verified)
+    _brightness.onAutoToggle = ^(BOOL on) {
+        // This is a Settings shortcut, not a verified auto-brightness setter.
+        LQSPanelViewController *panel = weakSelf;
+        if (!panel) return;
+        panel->_brightness.autoOn = !on;
+        [panel openSettingsURL:@"prefs:root=DISPLAY"];
+    };
     [_brightness addTarget:self action:@selector(brightnessChanged) forControlEvents:UIControlEventValueChanged];
     // Brightness mirror: while dragging only the slider stays visible (BrightnessMirrorController).
     _brightness.onDragChanged = ^(BOOL d) { [weakSelf mirror:d]; };
@@ -344,11 +357,60 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 }
 
 - (void)openSettingsURL:(NSString *)url {
+    __weak typeof(self) weakSelf = self;
+    if ([self requireUnlockFor:@"settings" action:^{ [weakSelf openSettingsURL:url]; }]) return;
     if (![LQSBackends realActionsEnabled]) return;
     UIApplication *app = UIApplication.sharedApplication;
     SEL sbOpen = NSSelectorFromString(@"applicationOpenURL:");
     if ([app respondsToSelector:sbOpen]) ((void (*)(id, SEL, id))objc_msgSend)(app, sbOpen, [NSURL URLWithString:url]);
     [self.delegate panelRequestsDismiss:self];
+}
+
+- (BOOL)requireUnlockFor:(NSString *)identifier action:(dispatch_block_t)action {
+    if (!LQSRequiresUnlock(identifier) || !LQSDeviceIsLocked()) return NO;
+    if ([LQSAuthentication isPending]) return YES;
+    NSUInteger epoch = _presentationEpoch;
+    __weak typeof(self) weakSelf = self;
+    BOOL started = [LQSAuthentication requestUnlockWithCompletion:^(BOOL unlocked) {
+        LQSPanelViewController *panel = weakSelf;
+        if (!unlocked || !panel || panel->_presentationEpoch != epoch || panel->_progress <= 0.001 || LQSDeviceIsLocked()) return;
+        [panel refreshRealStates];
+        [panel->_notifs reload];
+        action();
+    }];
+    if (!started && !self.presentedViewController) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:LQSL(@"Unlock required")
+            message:LQSL(@"Unlock your iPhone to use this control.") preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:LQSL(@"OK") style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    }
+    return YES;
+}
+
+- (void)unlockNotifications {
+    __weak typeof(self) weakSelf = self;
+    if (![self requireUnlockFor:@"notifications" action:^{ [weakSelf layoutAll]; }]) [self layoutAll];
+}
+
+- (void)lockStateChanged:(NSNotification *)notification {
+    [UIView performWithoutAnimation:^{
+        // Hide the raw custom list before any relayout/crossfade can display its
+        // cached previews or attachments. Locked QS uses a generic unlock row.
+        self->_notifs.hidden = LQSDeviceIsLocked() || !self->_settings.showNotifications;
+        if (LQSDeviceIsLocked()) {
+            [self->_dialog removeFromSuperview]; self->_dialog = nil;
+            if (self->_editor) {
+                ++self->_editorEpoch;
+                [self->_editor removeFromSuperview]; self->_editor = nil;
+                self->_state = LQSPanelStateExpanded;
+                [self->_content.layer removeAnimationForKey:@"opacity"];
+                self->_content.alpha = ContentAlpha(self->_progress);
+                [self rebuildTiles];
+            }
+        }
+        [self refreshRealStatesIncludingBrightness:NO];
+        [self layoutAll];
+    }];
 }
 
 - (void)settingsTapped { LQSHapticTick(); [self openSettingsURL:@"prefs:root=ROOT"]; }
@@ -411,7 +473,7 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     _page = _q <= 0 ? 0 : MIN(_page, pages - 1);
     _qsPageCrossfade = _q > 0 && _q < 1 && _page >= 0.5;
     _brightness.showAuto = _settings.showAutoBrightness;
-    _notifs.hidden = !_settings.showNotifications;
+    _notifs.hidden = LQSDeviceIsLocked() || !_settings.showNotifications;
     [self.view setNeedsLayout];
 }
 
@@ -446,6 +508,7 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 
 - (NSString *)secondaryFor:(LQSTileView *)t info:(NSDictionary *)info {
     NSString *ident = t.spec.identifier;
+    if (LQSDeviceIsLocked() && LQSRequiresUnlock(ident)) return LQSL(@"Unlock");
     if ([LQSBackends isTransitioning:ident] || ([ident isEqualToString:@"screenrecord"] && [LQSBackends recordingCountdown] > 0)) return LQSL(t.on ? @"On" : @"Off");
     if ([ident isEqualToString:@"internet"]) {
         if ([info[@"wifiAssociated"] boolValue] && [info[@"wifiName"] length]) return info[@"wifiName"];
@@ -482,6 +545,7 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 - (void)startLiveUpdates {
     if (_liveTimer) return;
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+    [nc addObserver:self selector:@selector(lockStateChanged:) name:LQSLockStateChangedNotification object:nil];
     for (NSString *name in @[LQSBackendsChangedNotification, LQSLiveInfoChangedNotification, UIScreenCapturedDidChangeNotification, @"BluetoothPowerChangedNotification", @"BluetoothDeviceConnectSuccessNotification",
                              @"BluetoothDeviceDisconnectSuccessNotification", @"BluetoothConnectionStatusChangedNotification",
                              NSProcessInfoPowerStateDidChangeNotification, UIDeviceBatteryLevelDidChangeNotification, UIDeviceBatteryStateDidChangeNotification]) {
@@ -514,6 +578,8 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 #pragma mark - Tile actions (Tile.kt:240-310)
 
 - (void)confirmStopRecording {
+    __weak typeof(self) weakSelf = self;
+    if ([self requireUnlockFor:@"screenrecord" action:^{ [weakSelf confirmStopRecording]; }]) return;
     if (self.presentedViewController) return;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:LQSL(@"Stop recording") message:nil preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:LQSL(@"Cancel") style:UIAlertActionStyleCancel handler:nil]];
@@ -524,15 +590,17 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 }
 
 - (void)showDetailsFor:(NSString *)ident {
+    __weak typeof(self) authSelf = self;
+    if ([self requireUnlockFor:@"details" action:^{ [authSelf showDetailsFor:ident]; }]) return;
     [_dialog removeFromSuperview];
     BOOL net = [ident isEqualToString:@"wifi"] || [ident isEqualToString:@"internet"] || [ident isEqualToString:@"cell"];
     LQSDetailDialog *d = [[LQSDetailDialog alloc] initWithKind:net ? LQSDetailKindInternet : LQSDetailKindBluetooth];
     __weak typeof(self) weakSelf = self;
     d.openSettings = ^(NSString *tile) {
         typeof(self) s = weakSelf;
-        [LQSBackends openSettingsFor:tile];
-        [s->_dialog dismiss];
-        [s.delegate panelRequestsDismiss:s];
+        if (!s) return;
+        void (^open)(void) = ^{ [LQSBackends openSettingsFor:tile]; [s->_dialog dismiss]; [s.delegate panelRequestsDismiss:s]; };
+        if (![s requireUnlockFor:@"settings" action:open]) open();
     };
     d.stateChanged = ^{ [weakSelf scheduleLiveRefresh]; };
     _dialog = d;
@@ -554,7 +622,7 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     if ([ident isEqualToString:@"cell"] && [[LQSBackends liveInfo][@"noSIM"] boolValue]) { [tile contentBounce]; return; } // can't enable without a SIM
     LQSBackendState s = [LQSBackends stateFor:ident];
     if (s < 0) {
-        if ([LQSBackends settingsURLFor:ident]) { [LQSBackends openSettingsFor:ident]; [self.delegate panelRequestsDismiss:self]; }
+        if ([LQSBackends settingsURLFor:ident]) [self openSettingsURL:[LQSBackends settingsURLFor:ident]];
         return;
     }
     LQSBackendState after = [LQSBackends activate:ident];
@@ -582,6 +650,11 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 }
 
 - (void)tileTapped:(LQSTileView *)tile {
+    __weak typeof(self) weakSelf = self;
+    if ([self requireUnlockFor:tile.spec.identifier action:^{
+        LQSPanelViewController *panel = weakSelf;
+        if (panel && [panel->_tiles containsObject:tile]) [panel tileTapped:tile];
+    }]) return;
     LQSHapticTick();
     if (!tile.bouncesContainer) [tile contentBounce];
     BOOL iconOnly = tile.size == LQSTileSizeSmall;
@@ -607,6 +680,14 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 - (void)tileLongPressed:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
     LQSTileView *tile = (LQSTileView *)g.view;
+    [self longPressTile:tile];
+}
+- (void)longPressTile:(LQSTileView *)tile {
+    __weak typeof(self) weakSelf = self;
+    if ([self requireUnlockFor:@"settings" action:^{
+        LQSPanelViewController *panel = weakSelf;
+        if (panel && [panel->_tiles containsObject:tile]) [panel longPressTile:tile];
+    }]) return;
     LQSHapticTick();
     [tile cancelTrackingWithEvent:nil];
     // Small available dual-target tiles: long press = main click (details); else settings.
@@ -762,7 +843,12 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
     CGFloat nTop = LQSNotificationTop(p, q, [self qqsBottom] + 12, b.size.height) + _overExpansion;
     CGFloat listHeight = LQSNotificationViewportHeight(p, b.size.height, nTop);
     _notificationArea.frame = CGRectMake(0, nTop, w, MAX(0, b.size.height - nTop));
-    _notificationArea.hidden = _notifs.hidden || p <= 0.001;
+    BOOL locked = LQSDeviceIsLocked();
+    _notifs.hidden = locked || !_settings.showNotifications;
+    _notificationArea.hidden = !_settings.showNotifications || p <= 0.001;
+    _lockedNotifications.hidden = !locked;
+    _lockedNotifications.frame = CGRectMake(inset, 16, w - 2 * inset, MIN(72, MAX(0, listHeight - 16)));
+    _lockedNotifications.alpha = ContentAlpha(p);
     _notifs.frame = CGRectMake(0, 0, w, listHeight);
     _notifs.expansionProgress = p;
     _notifs.qsExpansionProgress = q;
@@ -834,6 +920,8 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
 
 - (void)setState:(LQSPanelState)state animated:(BOOL)animated {
     if (state == LQSPanelStateEditor) {
+        __weak typeof(self) weakSelf = self;
+        if ([self requireUnlockFor:@"edit" action:^{ [weakSelf setState:state animated:animated]; }]) return;
         if (!_settings.editorEnabled) return;
         if (_q < 0.999) [self setQ:1];
         _state = state;
@@ -1120,7 +1208,7 @@ static CGFloat Lerp(CGFloat a, CGFloat b, CGFloat t) { return a + (b - a) * t; }
         }
         // Inside the notification list the list's own pan handles it (listPan:).
         CGRect notificationRect = [_notifs convertRect:_notifs.bounds toView:self.view];
-        if (_q < 0.05 && !_notificationArea.hidden && CGRectContainsPoint(notificationRect, [g locationInView:self.view])) return NO;
+        if (_q < 0.05 && !_notificationArea.hidden && !_notifs.hidden && CGRectContainsPoint(notificationRect, [g locationInView:self.view])) return NO;
         return YES;
     }
     return YES;

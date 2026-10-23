@@ -1,4 +1,5 @@
 #import "LQSNotifications.h"
+#import "LQSAuthentication.h"
 #import "LQSStrings.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -158,6 +159,7 @@ static NSString *AppName(NSString *bundleID, id content) {
 }
 
 - (BOOL)openItem:(LQSNotificationItem *)item {
+    if (LQSDeviceIsLocked()) return NO;
     id action = V(item.request, @"defaultAction");
     SEL sel = NSSelectorFromString(@"destination:executeAction:forNotificationRequest:requestAuthentication:withParameters:completion:");
     if (!action) return NO;
@@ -176,6 +178,7 @@ static NSString *AppName(NSString *bundleID, id content) {
 }
 
 - (BOOL)clearItems:(NSArray<LQSNotificationItem *> *)items {
+    if (LQSDeviceIsLocked()) return NO;
     if (!items.count) return NO;
     SEL sel = NSSelectorFromString(@"destination:requestsClearingNotificationRequests:");
     if (![self.dispatcher respondsToSelector:sel]) return NO;
